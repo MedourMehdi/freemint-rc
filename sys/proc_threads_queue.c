@@ -128,7 +128,7 @@ void add_to_ready_queue(struct thread *t) {
     
     // Dump final ready queue for debugging (only at highest verbosity level)
     TRACE_THREAD_QUEUE_AFTER(t);
-#if THREAD_DEBUG_LEVEL >= THREAD_DEBUG_ALL
+#if THREAD_DEBUG_LEVEL >= THREAD_DEBUG_NORMAL
     curr = p->ready_queue;
     while (curr) {
         TRACE_THREAD("  Thread %d (pri %d, policy %d, boost=%d)", 
@@ -324,7 +324,7 @@ int is_in_ready_queue(struct thread *t) {
     TRACE_THREAD("READY_Q: Thread %d not found in ready queue", t->tid);
     return 0;
 }
-#if THREAD_DEBUG_LEVEL >= THREAD_DEBUG_NORMAL
+#if THREAD_DEBUG_LEVEL >= THREAD_DEBUG_VERBOSE
 int is_in_wait_queue(struct thread *head, struct thread *t) {
     while (head) {
         if (head == t) return 1;
@@ -360,7 +360,7 @@ int is_in_sleep_queue(struct proc *p, struct thread *t) {
     TRACE_THREAD("SLEEP_Q: Thread %d not found in sleep queue", t->tid);
     return 0;
 }
-#endif // THREAD_DEBUG_LEVEL >= THREAD_DEBUG_NORMAL
+#endif // THREAD_DEBUG_LEVEL >= THREAD_DEBUG_VERBOSE
 
 /**
  * Find the highest priority thread in a wait queue using bitmap optimization

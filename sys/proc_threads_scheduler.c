@@ -57,7 +57,6 @@ struct thread_switch_context {
     struct proc *process;
     CONTEXT *to_ctx;
     unsigned long switch_time;
-    unsigned char should_reset_boost : 1; // 1-bit boolean
 };
 
 /* Structure to prepare scheduling decisions outside critical sections */
@@ -77,7 +76,7 @@ static void execute_scheduling_decision(struct proc *p, struct scheduling_decisi
 /**
  * Thread preemption handler
  * 
- * This function is called periodically to implement preemptive multitasking.
+ * This function is called periodically to implement preemptive multithreading.
  * It checks if the current thread should be preempted and schedules another thread if needed.
  */
 void thread_preempt_handler(PROC *p, long arg) {
@@ -91,10 +90,7 @@ void thread_preempt_handler(PROC *p, long arg) {
 
     // If not current process, reschedule the timeout
     if (p != curproc) {
-        /* Boost the timer for the current process */
-        /* Should be disabled for non threaded mintlib's functions like sleep() */
-        // make_process_eligible(p);
-
+        TRACE_THREAD("PREEMPT: Not current process, rescheduling timeout");
         reschedule_preemption_timer(p, (long)p->current_thread);
         return;
     }
@@ -122,14 +118,16 @@ void thread_preempt_handler(PROC *p, long arg) {
         return;
     }
     
+    sr = splhigh();
     p->p_thread_timer.in_handler = 1;
     p->p_thread_timer.timeout = NULL;
-    sr = splhigh();
-    
     struct thread *curr_thread = p->current_thread;
 
-    spl(sr);
+    TRACE_THREAD("PREEMPT: Current thread is %d, arg thread is %d", 
+                curr_thread ? curr_thread->tid : -1, 
+                thread_arg ? thread_arg->tid : -1);
 
+    spl(sr);
     proc_thread_schedule();
     TRACE_THREAD("PREEMPT: No switch needed, rescheduling current thread %d", curr_thread->tid);
     // No switch needed, reschedule timer
@@ -171,9 +169,6 @@ void proc_thread_schedule(void) {
 
 /**
  * Handle thread joining during thread exit
- * 
- * @param current The exiting thread
- * @param retval The return value of the exiting thread
  */
 void handle_thread_joining(struct thread *current, void *retval) {
     if (!current || !current->joiner || current->joiner->magic != CTXT_MAGIC) {
@@ -207,9 +202,6 @@ void handle_thread_joining(struct thread *current, void *retval) {
 
 /**
  * Cancel all timeouts associated with a thread
- * 
- * @param p The process containing the thread
- * @param t The thread whose timeouts should be cancelled
  */
 static void cancel_thread_timeouts(struct proc *p, struct thread *t) {
     if (!p || !t) {
@@ -228,9 +220,6 @@ static void cancel_thread_timeouts(struct proc *p, struct thread *t) {
 
 /**
  * Find the next thread to run after a thread exits
- * 
- * @param p The process containing the threads
- * @return The next thread to run, or NULL if none found
  */
 static struct thread *find_next_thread_to_run(struct proc *p) {
     struct thread *next_thread = NULL;
@@ -296,10 +285,6 @@ static struct thread *find_next_thread_to_run(struct proc *p) {
 
 /**
  * Clean up thread resources during thread exit
- * 
- * @param p The process containing the thread
- * @param t The thread to clean up
- * @param tid The thread ID (for logging)
  */
 void cleanup_thread_resources(struct proc *p, struct thread *t, int tid) {
     if (!p || !t || t->magic != CTXT_MAGIC) {
@@ -376,17 +361,6 @@ void cleanup_thread_resources(struct proc *p, struct thread *t, int tid) {
 
 /**
  * Thread exit function
- * 
- * This function handles the termination of a thread, including:
- * - Handling thread joining
- * - Special handling for thread0
- * - Cancelling timeouts
- * - Removing from queues
- * - Finding the next thread to run
- * - Cleaning up resources
- * - Context switching
- * 
- * @param retval The return value of the exiting thread
  */
 void proc_thread_exit(void *retval, void *arg) {
 
@@ -522,10 +496,13 @@ void proc_thread_exit(void *retval, void *arg) {
         atomic_thread_state_change(next_thread, THREAD_STATE_RUNNING);
         p->current_thread = next_thread;
         target_ctx = get_thread_context(next_thread);
-        
         if (!target_ctx) {
             TRACE_THREAD("EXIT ERROR: Could not get context for thread %d", next_thread->tid);
             next_thread = NULL;
+        } else {
+            reset_thread_priority(next_thread);
+            TRACE_THREAD("EXIT: Switching to thread %d context, PC=%lx", 
+                        next_thread->tid, target_ctx->pc);
         }
     }
 
@@ -578,18 +555,6 @@ void proc_thread_exit(void *retval, void *arg) {
     proc_thread_schedule();
 }
 
-/**
- * Helper function to determine if a thread should be scheduled
- * 
- * This function implements POSIX-compliant scheduling policies:
- * - SCHED_FIFO: First-in, first-out scheduling without time slicing
- * - SCHED_RR: Round-robin scheduling with time slicing
- * - SCHED_OTHER: Default time-sharing scheduling
- * 
- * @param current The currently running thread
- * @param next The candidate thread to be scheduled next
- * @return 1 if next should preempt current, 0 otherwise
- */
 static inline short should_schedule_thread(struct thread *current, struct thread *next) {
     if (!next) {
         TRACE_THREAD("THREAD_SCHED (should_schedule_thread): Invalid thread");
@@ -621,32 +586,25 @@ static inline short should_schedule_thread(struct thread *current, struct thread
 
     /* PRIORITY CHECK FIRST - Higher priority always preempts */
     if (next->priority > current->priority) {
-        /* But respect minimum timeslice for non-boosted threads */
-        if (!next->priority_boost && current->tid >= 0 && elapsed < next->proc->thread_min_timeslice && (current->state & THREAD_STATE_RUNNING)) {
-            TRACE_THREAD("THREAD_SCHED (should_schedule_thread): Higher priority thread %d waiting for min timeslice",
-                        next->tid);
-            return 0;
-        }
-        
         TRACE_THREAD("THREAD_SCHED (should_schedule_thread): Higher priority thread %d (pri %d%s) preempting thread %d (pri %d)",
                     next->tid, next->priority, next->priority_boost ? " boosted" : "",
                     current->tid, current->priority);
         return 1;
     }
 
+    /* RT threads always preempt SCHED_OTHER threads (regardless of numerical priority) */
+    if ((next->policy == SCHED_FIFO || next->policy == SCHED_RR) &&
+        current->policy == SCHED_OTHER) {
+        TRACE_THREAD("THREAD_SCHED (should_schedule_thread): RT thread %d preempting SCHED_OTHER thread %d",
+                    next->tid, current->tid);
+        return 1;
+    }
+
     /* Check minimum timeslice for equal/lower priority */
-    if (elapsed < current->proc->thread_min_timeslice) {
+    if (next->priority <= current->priority && elapsed < current->proc->thread_min_timeslice) {
         TRACE_THREAD("THREAD_SCHED (should_schedule_thread): Current thread %d hasn't used minimum timeslice (%lu < %d)",
                     current->tid, elapsed, current->proc->thread_min_timeslice);
         return 0;
-    }
-
-    /* RT threads always preempt SCHED_OTHER threads (regardless of priority) */
-    if ((next->policy == SCHED_FIFO || next->policy == SCHED_RR) &&
-        next->priority > 0 && current->policy == SCHED_OTHER) {
-        TRACE_THREAD("THREAD_SCHED (should_schedule_thread): RT thread %d (pri %d) preempting SCHED_OTHER thread %d",
-                    next->tid, next->priority, current->tid);
-        return 1;
     }
 
     /* Equal priority handling */
@@ -662,6 +620,12 @@ static inline short should_schedule_thread(struct thread *current, struct thread
         if (elapsed >= current->timeslice) {
             TRACE_THREAD("THREAD_SCHED (should_schedule_thread): Thread %d timeslice expired (%lu >= %d), switching to %d",
                         current->tid, elapsed, current->timeslice, next->tid);
+            return 1;
+        }
+
+        /* For SCHED_RR at same priority, yield after timeslice */
+        if (current->policy == SCHED_RR && elapsed >= current->timeslice) {
+            TRACE_THREAD("THREAD_SCHED (should_schedule_thread): SCHED_RR thread %d yielding after timeslice", current->tid);
             return 1;
         }
 
@@ -754,13 +718,6 @@ static void prepare_thread_switch(struct thread_switch_context *ctx) {
         ctx->to = NULL;
         return;
     }
-    
-    // Calculate if priority boost should be reset
-    if (ctx->from->priority_boost && ctx->from->tid != 0) {
-        unsigned long elapsed = ctx->switch_time - ctx->from->last_scheduled;
-        ctx->should_reset_boost = (elapsed > ctx->from->proc->thread_min_timeslice || 
-                                  ctx->from->wait_type != WAIT_NONE);
-    }
 }
 
 /* Add this new function to execute thread switch in minimal critical section */
@@ -783,16 +740,7 @@ static void execute_thread_switch(struct thread_switch_context *ctx) {
                                      thread_switch_timeout_handler);
     
     TRACE_THREAD("SWITCH: Switching threads: %d -> %d", ctx->from->tid, ctx->to->tid);
-    
-    // Reset priority boost if needed
-    if (ctx->should_reset_boost) {
-        TRACE_THREAD("SWITCH: Resetting priority boost for thread %d (current pri: %d, original: %d)",
-                    ctx->from->tid, ctx->from->priority, ctx->from->original_priority);
-        reset_thread_priority(ctx->from);
-    } else if (ctx->from->priority_boost && ctx->from->tid != 0) {
-        TRACE_THREAD("SWITCH: Keeping priority boost for thread %d",
-                    ctx->from->tid);
-    }
+
     // Update CPU time for outgoing thread
     now = get_system_ticks();
 
@@ -809,6 +757,14 @@ static void execute_thread_switch(struct thread_switch_context *ctx) {
     // Set new schedule time for incoming thread
     ctx->to->last_scheduled = now;
     TRACE_THREAD("SWITCH: Thread %d scheduled at %lu", ctx->to->tid, now);
+    if (
+        (ctx->from->priority_boost 
+        && get_system_ticks() - ctx->from->last_scheduled > ctx->from->proc->thread_min_timeslice) 
+        && (ctx->from->wait_type == WAIT_NONE)
+    ) 
+    {
+        reset_thread_priority(ctx->from);
+    }
 
     /* Check for pending signals in the thread we're switching to */
     if (ctx->to->proc->p_sigacts && ctx->to->proc->p_sigacts->thread_signals) {
@@ -831,24 +787,35 @@ static void execute_thread_switch(struct thread_switch_context *ctx) {
         change_context(ctx->to_ctx);
         
         TRACE_THREAD("SWITCH ERROR: Returned from change_context!");
-    } 
-    else if (save_context(get_thread_context(ctx->from)) == 0) {
-        TRACE_THREAD("SWITCH: Saved context successfully for thread %d", ctx->from->tid);
-        // Only change state if not blocked on mutex/semaphore
+    } else {
         if (ctx->from->wait_type == WAIT_NONE) {
             atomic_thread_state_change(ctx->from, THREAD_STATE_READY);
         }
-        atomic_thread_state_change(ctx->to, THREAD_STATE_RUNNING);
-        ctx->from->proc->current_thread = ctx->to;
+        if (save_context(get_thread_context(ctx->from)) == 0) {
+            TRACE_THREAD("SWITCH: Saved context successfully for thread %d", ctx->from->tid);
+            // Only change state if not blocked on mutex/semaphore
 
-        reset_thread_priority(ctx->to);
+            atomic_thread_state_change(ctx->to, THREAD_STATE_RUNNING);
+            ctx->from->proc->current_thread = ctx->to;
 
+            reset_thread_priority(ctx->to);
+
+            reset_thread_switch_state();
+            TRACE_THREAD("SWITCH: Switched to context for thread %d", ctx->to->tid);
+            change_context(ctx->to_ctx);
+            
+            TRACE_THREAD("SWITCH ERROR: Returned from change_context!");
+        } else {
+            TRACE_THREAD("SWITCH ERROR: Failed to save context for thread %d", ctx->from->tid);
+            // If we failed to save context, we can't switch
+            atomic_thread_state_change(ctx->from, THREAD_STATE_RUNNING);
+            ctx->to = NULL;
+        }
+        TRACE_THREAD("SWITCH: Return path after being switched back");
+        // Return path after being switched back
         reset_thread_switch_state();
-        TRACE_THREAD("SWITCH: Switched to context for thread %d", ctx->to->tid);
-        change_context(ctx->to_ctx);
-        
-        TRACE_THREAD("SWITCH ERROR: Returned from change_context!");
     }
+
     TRACE_THREAD("SWITCH: Return path after being switched back");
     // Return path after being switched back
     reset_thread_switch_state();
@@ -1112,6 +1079,7 @@ void thread_timer_start(struct proc *p, int thread_id) {
         if (!timer_operation_locked) {
             TRACE_THREAD("TIMER: Acquired timer operation lock");
             timer_operation_locked = 1;
+            spl(sr);
             break;
         }
         spl(sr);
@@ -1151,7 +1119,7 @@ void thread_timer_start(struct proc *p, int thread_id) {
     p->p_thread_timer.enabled = 1;
     p->p_thread_timer.in_handler = 0;
     
-    TRACE_THREAD("TIMER: Thread timer started for process %d", p->pid);
+    TRACE_THREAD("TIMER: Thread timer started for process %d with interval %dms", p->pid, p->thread_preempt_interval);
     spl(sr);
     
 cleanup:

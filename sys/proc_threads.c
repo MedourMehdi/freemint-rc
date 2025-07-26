@@ -539,10 +539,10 @@ static void *idle_thread_func(void *arg) {
         /* This make the PREEMPT Timer function to never fire! 
         * Need to be fixed.
         */
-        yield(); 
+        // yield(); 
         // sys_f_select (1L, 0L, 0L, 0L);
 
-        // asm volatile("nop");
+        asm volatile("nop");
         
         proc_thread_schedule();
     }

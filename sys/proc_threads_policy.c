@@ -67,30 +67,21 @@ static int set_thread_policy(struct thread *t, enum sched_policy policy, int pri
 
     // Acquire lock        
     register unsigned short sr = splhigh();
-
-    // Validate policy and priority
-    if (policy != SCHED_FIFO && policy != SCHED_RR && policy != SCHED_OTHER)
-        return EINVAL;
-
-    // SCHED_OTHER can only use priority 0
-    if (policy == SCHED_OTHER && priority != 0)
-        priority = 0;
-
-    // Clamp priority to valid range
-    if (priority < 0)
-        priority = 0;
-    else if (priority > MAX_THREAD_PRIORITY)
-        priority = MAX_THREAD_PRIORITY;
         
     // Save old values
-    #ifdef DEBUG_THREAD
     int old_policy = t->policy;
-    #endif
     int old_priority = t->priority;
-    
+
+    int was_running = (t->state == THREAD_STATE_RUNNING);
+    int was_in_ready_queue = is_in_ready_queue(t); 
+
     // Update policy
     t->policy = policy;
-    
+
+    if (!t->priority_boost) {
+        t->original_priority = priority;
+    }
+
     // Update timeslice based on new policy
     if (policy == SCHED_RR) {
         t->timeslice = t->proc->thread_rr_timeslice;
@@ -102,51 +93,73 @@ static int set_thread_policy(struct thread *t, enum sched_policy policy, int pri
     
     // Reset remaining timeslice
     t->remaining_timeslice = t->timeslice;
-    
-    // Update priority based on POSIX rules for SCHED_FIFO
-    if (policy == SCHED_FIFO && t->state == THREAD_STATE_RUNNING) {
-        if (priority > old_priority) {
-            // If raising priority, move to end of list for new priority
-            if (is_in_ready_queue(t)) {
-                remove_from_ready_queue(t);
-                t->priority = priority;
-                add_to_ready_queue(t);
-            } else {
-                t->priority = priority;
+
+    // Handle priority change according to POSIX rules
+    if (was_running || was_in_ready_queue) {
+        // Remove from ready queue if present
+        if (was_in_ready_queue) {
+            remove_from_ready_queue(t);
+        }
+        
+        // Update priority
+        t->priority = priority;
+        
+        // POSIX: When priority is changed, thread goes to END of new priority queue
+        if (was_in_ready_queue) {
+            add_to_ready_queue(t);  // This should add to end of priority queue
+        }
+        
+        // If this was the running thread and priority was lowered, or policy changed to less favorable
+        if (was_running) {
+            int should_preempt = 0;
+            
+            // Check if we should yield immediately
+            if (priority < old_priority) {
+                should_preempt = 1;
+                TRACE_THREAD("POLICY: Thread %d priority lowered from %d to %d, will be preempted",
+                            t->tid, old_priority, priority);
+            } else if (old_policy == SCHED_FIFO && policy == SCHED_RR && priority == old_priority) {
+                should_preempt = 1;
+
+                TRACE_THREAD("POLICY: Thread %d changed from SCHED_FIFO to SCHED_RR, will be preempted",
+                            t->tid);
+            } else if (old_policy != SCHED_OTHER && policy == SCHED_OTHER) {
+                should_preempt = 1;
+                TRACE_THREAD("POLICY: Thread %d changed to SCHED_OTHER, will be preempted", t->tid);
             }
-        } else if (priority < old_priority) {
-            // If lowering priority, move to front of list for new priority
-            if (is_in_ready_queue(t)) {
-                remove_from_ready_queue(t);
-                t->priority = priority;
-                // Add to front of ready queue
+            
+            if (should_preempt) {
+                // Add current thread to ready queue and trigger reschedule
+                atomic_thread_state_change(t, THREAD_STATE_READY);
                 add_to_ready_queue(t);
-            } else {
-                t->priority = priority;
+                spl(sr);
+                proc_thread_schedule();
+                return 0;
             }
-        } else {
-            // No change in priority, position unchanged
         }
     } else {
-        // For other policies or non-running threads, just update priority
+        // Thread not running or ready, just update priority
         t->priority = priority;
     }
-    
-    // If not using priority boost, update original priority too
-    if (!t->priority_boost) {
-        t->original_priority = priority;
+
+#if THREAD_DEBUG_LEVEL >= THREAD_DEBUG_NORMAL    
+    /* Legacy handling for compatibility - should be removed eventually */
+    if (policy == SCHED_FIFO && was_running) {    
+        if (priority > old_priority) {
+            // Higher priority should preempt immediately if there are lower priority threads
+            // This is handled by the scheduler, not here
+            TRACE_THREAD("POLICY: Thread %d priority raised from %d to %d", t->tid, old_priority, priority);            
+        } else if (priority < old_priority) {
+            // Lower priority should yield immediately - handled above
+            TRACE_THREAD("POLICY: Thread %d priority lowered from %d to %d", t->tid, old_priority, priority);        
+        }
     }
+#endif
     
     #ifdef DEBUG_THREAD
     TRACE_THREAD("THREAD_SCHED: Thread %d policy changed from %d to %d, priority from %d to %d, timeslice=%d",
                 t->tid, old_policy, policy, old_priority, priority, t->timeslice);
     #endif
-    // If this is the current thread and we lowered priority, trigger a reschedule
-    if (t == t->proc->current_thread && priority < old_priority) {
-        spl(sr);
-        proc_thread_schedule();
-        return 0;
-    }
     
     spl(sr);
     return 0;
@@ -369,6 +382,7 @@ void update_thread_timeslice(struct thread *t)
         if (t->remaining_timeslice <= elapsed) {
             // Reset timeslice when expired
             t->remaining_timeslice = t->timeslice;
+            reset_thread_priority(t);
         } else {
             // Decrement remaining timeslice
             t->remaining_timeslice -= elapsed;

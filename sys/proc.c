@@ -216,7 +216,7 @@ init_proc(void)
 
 	/* Initialize thread scheduling parameters */
 	rootproc->thread_preempt_interval = time_slice * 2 + (time_slice >> 1); /* 2.5x time_slice */
-	// rootproc->thread_preempt_interval *= 5; /* Convert to ms */
+	rootproc->thread_preempt_interval *= 5; /* Convert to ms */
 	
 	rootproc->thread_default_timeslice = time_slice * 5; /* 5x time_slice */
 	rootproc->thread_min_timeslice = time_slice; /* 1x time_slice */
