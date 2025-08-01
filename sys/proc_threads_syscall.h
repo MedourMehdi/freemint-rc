@@ -57,8 +57,6 @@
 #define THREAD_CTRL_IS_MULTITHREADED   14   /* Check if process is multithreaded */
 #define THREAD_CTRL_SWITCH_TO_MAIN     15   /* Switch to main thread context */
 #define THREAD_CTRL_SWITCH_TO_THREAD   16   /* Switch to specific thread */
-#define THREAD_CTRL_GET_ERRNO_PTR      17   /* Get current thread's errno */
-
 
 /* ============================================================================
  * P_THREAD_SYNC OPERATIONS (sys_p_thread_sync)

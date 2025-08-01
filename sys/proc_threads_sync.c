@@ -187,6 +187,8 @@ TRACE_THREAD("JOIN: Thread %d waiting for thread %d to exit, join_retval=%p",
     
     // Block the current thread
     atomic_thread_state_change(current, THREAD_STATE_BLOCKED);
+
+    remove_from_ready_queue(current);
     
     if (save_context(get_thread_context(current)) == 0) {
         // First time through - going to sleep

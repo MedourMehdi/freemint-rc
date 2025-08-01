@@ -21,5 +21,6 @@ long proc_thread_sleep(long ms);
 void check_and_wake_sleeping_threads(struct proc *p);
 int wake_threads_by_time(struct proc *p, unsigned long current_time);
 void proc_thread_sleep_wakeup_handler(PROC *p, long arg);
+void cleanup_thread_sleep_state(struct thread *t);
 
 #endif /* PROC_THREADS_SLEEP_H */

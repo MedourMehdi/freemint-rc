@@ -29,6 +29,7 @@
 #include "proc_threads_tsd.h"
 #include "proc_threads_cleanup.h"
 #include "proc_threads_cancel.h"
+#include "arch/kernel.h"
 
 static void reset_thread_switch_state(void);
 static void thread_switch_timeout_handler(PROC *p, long arg);
@@ -207,12 +208,17 @@ static void cancel_thread_timeouts(struct proc *p, struct thread *t) {
     if (!p || !t) {
         return;
     }
-    
+    // Cancel sleep timeout specifically first
+    if (t->sleep_timeout) {
+        TRACE_THREAD("EXIT: Cancelling sleep timeout for thread %d", t->tid);
+        canceltimeout(t->sleep_timeout);
+        t->sleep_timeout = NULL;
+    }    
     TIMEOUT *timelist, *next_timelist;
     for (timelist = tlist; timelist; timelist = next_timelist) {
         next_timelist = timelist->next;
         if (timelist->proc == p && timelist->arg == (long)t) {
-            TRACE_THREAD("Cancelling timeout with thread %d as argument", t->tid);
+            TRACE_THREAD("EXIT: Cancelling timeout with thread %d as argument", t->tid);
             canceltimeout(timelist);
         }
     }
@@ -293,6 +299,9 @@ void cleanup_thread_resources(struct proc *p, struct thread *t, int tid) {
     }
     TRACE_THREAD("EXIT: Cleaning up resources for thread %d", tid);
 
+    /* Clean up sleep state */
+    cleanup_thread_sleep_state(t);
+
     /* Clean up signal stack */
     cleanup_signal_stack(p, (long)t);
 
@@ -308,12 +317,9 @@ void cleanup_thread_resources(struct proc *p, struct thread *t, int tid) {
     /* Clean up thread-specific data */
     cleanup_thread_tsd(t);
 
-    if (t->alarm_timeout) {
-        canceltimeout(t->alarm_timeout);
-        t->alarm_timeout = NULL;
-        TRACE_THREAD("EXIT: Cancelled alarm timeout for thread %d", tid);
-    }
-    
+    /* Cancel all remaining timeouts for this thread */
+    cancel_thread_timeouts(p, t);
+
     // Clear thread signal state
     t->t_sigpending = 0;
     THREAD_SIGMASK_SET(t, 0);
@@ -427,6 +433,13 @@ void proc_thread_exit(void *retval, void *arg) {
     TRACE_THREAD("EXIT: Cancelling timeouts for thread %d", tid);
     cancel_thread_timeouts(p, current);
 
+    // Additional safety: clear sleep state immediately
+    if (current->wait_type & WAIT_SLEEP) {
+        current->wait_type &= ~WAIT_SLEEP;
+        current->wakeup_time = 0;
+        remove_from_sleep_queue(p, current);
+    }
+
     // Check for pending signals before exiting
     if (current->t_sigpending) {
         int sig = check_thread_signals(current);
@@ -527,8 +540,8 @@ void proc_thread_exit(void *retval, void *arg) {
     // If no valid thread found, use process context
     if (!target_ctx) {
         TRACE_THREAD("EXIT: No next thread, returning to process context");
-        target_ctx = &p->ctxt[CURRENT];
         p->current_thread = get_main_thread(p);
+        target_ctx = get_thread_context(p->current_thread);
     }
     
     // Clean up thread resources
@@ -541,17 +554,20 @@ void proc_thread_exit(void *retval, void *arg) {
     exit_owner_tid = -1;
     
     // Switch to target context
-    TRACE_THREAD("EXIT: Switching to target context, PC=%lx", target_ctx->pc);
+    TRACE_THREAD("EXIT: Switching to target context, sr = %x, ssp = %lx, usp = %lx, pc = %lx", target_ctx->sr, target_ctx->ssp, target_ctx->usp, target_ctx->pc);
     
     // CRITICAL: Do NOT save context when exiting!
     // The exiting thread should never resume - just switch directly
     spl(sr);
+    target_ctx->regs[0] = 1;
+    if((target_ctx->sr & 0x2000) == 0) leave_kernel();
     change_context(target_ctx);
     
     // Should NEVER reach here - if we do, it's a critical error
     TRACE_THREAD("CRITICAL ERROR: Returned from change_context after thread exit!");
     
     // Try to recover by scheduling another thread
+
     proc_thread_schedule();
 }
 
@@ -649,12 +665,15 @@ void thread_switch(struct thread *from, struct thread *to) {
     
     // Special case: if from is NULL, just switch to the destination thread
     if (!from) {
+        CONTEXT *to_ctx = get_thread_context(to);
         to->last_scheduled = get_system_ticks();
         
         TRACE_THREAD("SWITCH: Switching to thread %d (no source thread)", to->tid);
         register unsigned short sr = splhigh();
         reset_thread_priority(to);
-        change_context(get_thread_context(to));
+        to_ctx->regs[0] = 1;
+        if((to_ctx->sr & 0x2000) == 0) leave_kernel();
+        change_context(to_ctx);
         spl(sr);
         return;
     }
@@ -756,7 +775,7 @@ static void execute_thread_switch(struct thread_switch_context *ctx) {
 
     // Set new schedule time for incoming thread
     ctx->to->last_scheduled = now;
-    TRACE_THREAD("SWITCH: Thread %d scheduled at %lu", ctx->to->tid, now);
+    TRACE_THREAD("SWITCH: Thread %d scheduled at %lu (was %lu)", ctx->to->tid, now, ctx->to->last_scheduled);
     if (
         (ctx->from->priority_boost 
         && get_system_ticks() - ctx->from->last_scheduled > ctx->from->proc->thread_min_timeslice) 
@@ -776,14 +795,16 @@ static void execute_thread_switch(struct thread_switch_context *ctx) {
     }
     
     // Handle context switch based on thread state
-    if ((ctx->from->wait_type & WAIT_SLEEP) || (ctx->from->wait_type & WAIT_JOIN)) {
+    if ((ctx->from->wait_type & WAIT_SLEEP) || (ctx->from->wait_type & WAIT_JOIN) || ctx->from->state & THREAD_STATE_EXITED) {
         TRACE_THREAD("SWITCH: Thread %d is sleeping, joining or waiting on semaphore, skipping switch", ctx->from->tid);
         // Sleeping thread path - direct context switch
         atomic_thread_state_change(ctx->to, THREAD_STATE_RUNNING);
         ctx->from->proc->current_thread = ctx->to;
         reset_thread_priority(ctx->to);
         reset_thread_switch_state();
-        TRACE_THREAD("SWITCH: Switched to context for thread %d", ctx->to->tid);
+        TRACE_THREAD("SWITCH: Switched to context for thread %d, sr = %x, ssp = %lx, usp = %lx, pc = %lx", ctx->to->tid, ctx->to_ctx->sr, ctx->to_ctx->ssp, ctx->to_ctx->usp, ctx->to_ctx->pc);
+        ctx->to_ctx->regs[0] = 1;
+        if((ctx->to_ctx->sr & 0x2000) == 0) leave_kernel();
         change_context(ctx->to_ctx);
         
         TRACE_THREAD("SWITCH ERROR: Returned from change_context!");
@@ -791,29 +812,54 @@ static void execute_thread_switch(struct thread_switch_context *ctx) {
         if (ctx->from->wait_type == WAIT_NONE) {
             atomic_thread_state_change(ctx->from, THREAD_STATE_READY);
         }
-        if (save_context(get_thread_context(ctx->from)) == 0) {
-            TRACE_THREAD("SWITCH: Saved context successfully for thread %d", ctx->from->tid);
+        CONTEXT *from_ctx = get_thread_context(ctx->from);
+        
+        // Validate stack alignment before save (M68K requires even addresses)
+        if ((from_ctx->ssp & 1) || (from_ctx->usp & 1)) {
+            TRACE_THREAD("SWITCH ERROR: Invalid stack alignment - SSP=%lx, USP=%lx", 
+                        from_ctx->ssp, from_ctx->usp);
+            ctx->to = NULL;
+            return;
+        }
+        TRACE_THREAD("PRE-SAVE: Thread %d context - SSP=%lx, USP=%lx, PC=%lx", 
+                    ctx->from->tid, from_ctx->ssp, from_ctx->usp, from_ctx->pc);
+        
+        if (save_context(from_ctx) == 0) {
+            TRACE_THREAD("SWITCH: FIRST TIME - Saved context successfully for thread %d, ssp = %lx, usp = %lx, pc = %lx, sr = %x, to = %d", ctx->from->tid, from_ctx->ssp, from_ctx->usp, from_ctx->pc, from_ctx->sr, ctx->to->tid);
             // Only change state if not blocked on mutex/semaphore
-
+            if(ctx->to->state & THREAD_STATE_EXITED) {
+                TRACE_THREAD("SWITCH: Thread %d is exiting, skipping switch", ctx->to->tid);
+                atomic_thread_state_change(ctx->from, THREAD_STATE_RUNNING);
+                ctx->to = NULL;
+                return;
+            }
             atomic_thread_state_change(ctx->to, THREAD_STATE_RUNNING);
             ctx->from->proc->current_thread = ctx->to;
 
             reset_thread_priority(ctx->to);
 
             reset_thread_switch_state();
-            TRACE_THREAD("SWITCH: Switched to context for thread %d", ctx->to->tid);
+
+            TRACE_THREAD("SWITCH: Switched to context for thread %d, ssp = %lx, usp = %lx, pc = %lx, sr = %x", ctx->to->tid, ctx->to_ctx->ssp, ctx->to_ctx->usp, ctx->to_ctx->pc, ctx->to_ctx->sr);
+            
+            // CRITICAL FIX: Set D0 to non-zero so save_context returns non-zero on restoration
+            ctx->to_ctx->regs[0] = 1;
+            
+            if((ctx->to_ctx->sr & 0x2000) == 0) {
+                TRACE_THREAD("SWITCH: Leaving kernel mode for thread %d", ctx->to->tid);
+                leave_kernel();
+            }
             change_context(ctx->to_ctx);
             
             TRACE_THREAD("SWITCH ERROR: Returned from change_context!");
         } else {
-            TRACE_THREAD("SWITCH ERROR: Failed to save context for thread %d", ctx->from->tid);
+
+            TRACE_THREAD("SWITCH: SECOND TIME - Thread %d resumed from context switch at pc=%lx", ctx->from->tid, from_ctx->pc);
             // If we failed to save context, we can't switch
             atomic_thread_state_change(ctx->from, THREAD_STATE_RUNNING);
             ctx->to = NULL;
+            
         }
-        TRACE_THREAD("SWITCH: Return path after being switched back");
-        // Return path after being switched back
-        reset_thread_switch_state();
     }
 
     TRACE_THREAD("SWITCH: Return path after being switched back");
@@ -869,7 +915,7 @@ static int prepare_scheduling_decision(struct proc *p, struct scheduling_decisio
         // Try to find thread0 or create idle thread
         struct thread *thread0 = get_main_thread(p);
         
-        if (thread0 && thread0->state == THREAD_STATE_READY) {
+        if (thread0 && !(thread0->state & THREAD_STATE_EXITED)) {
             decision->next_thread = thread0;
             TRACE_THREAD("SCHED: Falling back to thread0");
         } else if (decision->current_thread && 
@@ -1046,10 +1092,12 @@ static void thread_switch_timeout_handler(PROC *p, long arg) {
         
         // More aggressive recovery - try to restore a known good state
         if (p && p->current_thread && p->current_thread->magic == CTXT_MAGIC) {
+            CONTEXT *ctx = get_thread_context(p->current_thread);
             TRACE_THREAD("TIMEOUT: Attempting to restore current thread %d", 
                         p->current_thread->tid);
-
-            change_context(get_thread_context(p->current_thread));
+            ctx->regs[0] = 1;
+            if((ctx->sr & 0x2000) == 0) leave_kernel();
+            change_context(ctx);
 
         }
         
@@ -1156,14 +1204,14 @@ void thread_timer_stop(PROC *p)
         
         /* If we've tried too many times, give up */
         if (++retry_count > 10) {
-            TRACE_THREAD("WARNING: Failed to acquire timer operation lock after 10 retries");
+            TRACE_THREAD("TIMER WARNING: Failed to acquire timer operation lock after 10 retries");
             return;
         }
 
     }
 
     /* CRITICAL SECTION - We now have the operation lock */
-    TRACE_THREAD("Stopping thread timer for process %d", p->pid);
+    TRACE_THREAD("TIMER: Stopping thread timer for process %d", p->pid);
     
     sr = splhigh();
     

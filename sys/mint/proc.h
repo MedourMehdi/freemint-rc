@@ -80,8 +80,6 @@ struct thread {
     short total_timeslice;          /* Total timeslice allocated to this thread */
     enum sched_policy policy;       /* Scheduling policy (SCHED_FIFO, SCHED_RR, SCHED_OTHER) */
 
-	int errno;                     /* Last error code */
-
     /* Thread linking */
     struct thread *next;            /* Next thread in process list */
     struct thread *next_ready;      /* For ready queue */

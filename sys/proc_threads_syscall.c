@@ -285,16 +285,6 @@ long _cdecl sys_p_thread_ctrl(long func, long arg1, long arg2) {
             spl(sr);
             return 0;
         }
-
-        case THREAD_CTRL_GET_ERRNO_PTR: {
-            struct thread *t = CURTHREAD;
-            if (!t) {
-                TRACE_THREAD("ERROR: sys_p_thread_ctrl called with invalid thread");
-                return EINVAL;
-            }
-            TRACE_THREAD("CTRL: sys_p_thread_ctrl called to get errno pointer for thread %d, pointer returned is %p, %lx", t->tid, t->errno, (long)&t->errno);
-            return (long)&t->errno;  // Return current thread's errno
-        }
         
         default:
             TRACE_THREAD("ERROR: sys_p_thread_ctrl called with invalid func %d", func);

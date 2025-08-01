@@ -173,6 +173,22 @@ void proc_thread_sleep_wakeup_handler(PROC *p, long arg) {
     if (!t || !p || t->proc != p) {
         return;
     }
+
+    // Critical safety check: Don't wake up exited threads
+    if (t->magic != CTXT_MAGIC || (t->state & THREAD_STATE_EXITED)) {
+        TRACE_THREAD("SLEEP_WAKEUP: Thread %d is invalid or exited (magic=%lx, state=%d), ignoring wakeup", 
+                    t->tid, t->magic, t->state);
+        return;
+    }
+    
+    // Additional check: ensure thread is actually sleeping
+    if (!(t->state & THREAD_STATE_BLOCKED) || !(t->wait_type & WAIT_SLEEP)) {
+        TRACE_THREAD("SLEEP_WAKEUP: Thread %d is not sleeping (state=%d, wait_type=%d), ignoring wakeup", 
+                    t->tid, t->state, t->wait_type);
+        return;
+    }
+    
+    TRACE_THREAD("SLEEP_WAKEUP: Valid wakeup for thread %d", t->tid);
     
     register unsigned short sr = splhigh();
 
@@ -183,28 +199,51 @@ void proc_thread_sleep_wakeup_handler(PROC *p, long arg) {
         return;
     }
 
-    // Only wake up if still sleeping
-    if ((t->state & THREAD_STATE_BLOCKED) && (t->wait_type & WAIT_SLEEP)) {
-        TRACE_THREAD("SLEEP_WAKEUP: Direct wakeup for thread %d", t->tid);
+    // Thread is valid and sleeping, proceed with wakeup
+    TRACE_THREAD("SLEEP_WAKEUP: Direct wakeup for thread %d", t->tid);
 
-        // Boost priority
-        boost_thread_priority(t, 5);  // Boost by 5 levels
-        
-        // Wake up thread
+    // Boost priority
+    boost_thread_priority(t, 5);  // Boost by 5 levels
+    
+    // Wake up thread
+    t->wait_type &= ~WAIT_SLEEP;
+    t->wakeup_time = 0;  // Clear wake-up time
+    t->sleep_timeout = NULL;  // Clear timeout reference
+    remove_from_sleep_queue(p, t);
+    atomic_thread_state_change(t, THREAD_STATE_READY);
+    add_to_ready_queue(t);
+    
+    // Force a schedule to run this thread immediately if possible
+    spl(sr);
+
+    reschedule_preemption_timer(p, t->tid);
+    proc_thread_schedule();
+}
+
+/**
+ * Clean up sleep state when a thread is being destroyed
+ */
+void cleanup_thread_sleep_state(struct thread *t) {
+    if (!t) return;
+    
+    register unsigned short sr = splhigh();
+    
+    // Cancel sleep timeout if active
+    if (t->sleep_timeout) {
+        TRACE_THREAD("CLEANUP: Cancelling sleep timeout for thread %d", t->tid);
+        canceltimeout(t->sleep_timeout);
+        t->sleep_timeout = NULL;
+    }
+    
+    // Clear sleep state
+    if (t->wait_type & WAIT_SLEEP) {
         t->wait_type &= ~WAIT_SLEEP;
-        t->wakeup_time = 0;  // Clear wake-up time
-        remove_from_sleep_queue(p, t);
-        atomic_thread_state_change(t, THREAD_STATE_READY);
-        add_to_ready_queue(t);
+        t->wakeup_time = 0;
         
-        // Force a schedule to run this thread immediately if possible
-        spl(sr);
-
-        reschedule_preemption_timer(p, t->tid);
-
-        proc_thread_schedule();
-        
-        return;
+        // Remove from sleep queue if present
+        if (t->proc && t->proc->sleep_queue) {
+            remove_from_sleep_queue(t->proc, t);
+        }
     }
     
     spl(sr);
@@ -271,8 +310,10 @@ long proc_thread_sleep(long ms) {
         spl(sr);
         return -1;
     }
-    
-    if (save_context(&t->ctxt[CURRENT]) == 0) {
+ 
+    CONTEXT *ctx = get_thread_context(t);
+
+    if (save_context(ctx) == 0) {
         // First time through - this is the "going to sleep" path
         TRACE_THREAD_SLEEP(t, ms, ticks, t->wakeup_time);
         
@@ -320,8 +361,38 @@ long proc_thread_yield(void) {
         yield();
         return 0;
     }
-        
+    if(p->current_thread->tid == -128 || p->current_thread->tid == 0) {
+        TRACE_THREAD("YIELD: Thread %d yielded, rescheduling", p->current_thread->tid);
+        yield();
+        proc_thread_schedule();
+        return 0;
+    }
+                
     t = p->current_thread;
+    
+    // CRITICAL FIX: Check if yield is beneficial
+    unsigned long now = get_system_ticks();
+    unsigned long elapsed = now - t->last_scheduled;
+    
+    TRACE_THREAD("YIELD: Thread %d - now=%lu, last_scheduled=%lu, elapsed=%lu", 
+                t->tid, now, t->last_scheduled, elapsed);
+    
+    // Don't yield if no other threads at same/higher priority
+    struct thread *next = get_highest_priority_thread(p);
+    if (!next || next == t) {
+        TRACE_THREAD("YIELD: Thread %d - no other threads to yield to", t->tid);
+        return 0;
+    }
+    
+    // Prevent excessive yielding (anti-livelock protection)
+    if (elapsed < 2) {
+        TRACE_THREAD("YIELD: Thread %d yielding too frequently (%lu ticks), ignoring", 
+                    t->tid, elapsed);
+        return 0;
+    }
+    
+    TRACE_THREAD("YIELD: Thread %d yielding after %lu ticks to thread %d", 
+                t->tid, elapsed, next->tid);
     
     // For SCHED_FIFO and SCHED_RR, move to end of same-priority list
     if (t->policy == SCHED_FIFO || t->policy == SCHED_RR) {
