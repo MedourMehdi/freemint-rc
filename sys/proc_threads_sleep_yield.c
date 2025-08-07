@@ -314,6 +314,7 @@ long proc_thread_sleep(long ms) {
     CONTEXT *ctx = get_thread_context(t);
 
     if (save_context(ctx) == 0) {
+        ctx->regs[0] = 1;
         // First time through - this is the "going to sleep" path
         TRACE_THREAD_SLEEP(t, ms, ticks, t->wakeup_time);
         
@@ -361,10 +362,14 @@ long proc_thread_yield(void) {
         yield();
         return 0;
     }
-    if(p->current_thread->tid == -128 || p->current_thread->tid == 0) {
+    if(p->current_thread->tid == 0) {
         TRACE_THREAD("YIELD: Thread %d yielded, rescheduling", p->current_thread->tid);
         yield();
-        proc_thread_schedule();
+        return 0;
+    }
+    if(p->current_thread->is_idle) {
+        TRACE_THREAD("YIELD: Idle thread %d yielded, rescheduling", p->current_thread->tid);
+        yield();
         return 0;
     }
                 

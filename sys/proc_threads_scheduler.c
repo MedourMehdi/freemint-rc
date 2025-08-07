@@ -234,6 +234,12 @@ static struct thread *find_next_thread_to_run(struct proc *p) {
         return NULL;
     }
     
+    // If only one thread left, return main thread
+    if (p->num_threads == 1) {
+        TRACE_THREAD("EXIT: Only one thread left, returning main thread");
+        return get_main_thread(p);
+    }
+    
     // STEP 1: First check the sleep queue for threads that should wake up
     if (p->sleep_queue) {
         unsigned long current_time = get_system_ticks();
@@ -266,18 +272,15 @@ static struct thread *find_next_thread_to_run(struct proc *p) {
         return next_thread;
     }
     
-    // STEP 3: If no thread in ready queue, try to find thread0
-    // (but only if we're not already thread0)
-    int current_tid = p->current_thread ? p->current_thread->tid : -1;
-    if (current_tid != 0) {
-        TRACE_THREAD("EXIT: No ready threads, looking for thread0");
+    // STEP 3: Always try to find thread0 first (unless we only have 1 thread left)
+    if (p->num_threads > 1) {
+        TRACE_THREAD("EXIT: Looking for thread0 (num_threads=%d)", p->num_threads);
         struct thread *t;
-        int count = 0;
-        for (t = p->threads; t != NULL && count < p->num_threads; t = t->next, count++) {
+        for (t = p->threads; t; t = t->next) {
             if (t->tid == 0 && 
                 t->magic == CTXT_MAGIC && 
                 !(t->state & THREAD_STATE_EXITED) &&
-                !(t->wait_type & WAIT_JOIN)) {
+                t->wait_type == WAIT_NONE) {
                 next_thread = t;
                 TRACE_THREAD("EXIT: Found thread0 at %p, state=%d, wait_type=%d", 
                             next_thread, next_thread->state, next_thread->wait_type);
@@ -286,6 +289,24 @@ static struct thread *find_next_thread_to_run(struct proc *p) {
         }
     }
     
+    // STEP 4: Only create idle thread if no thread0 and there are joinable threads
+    if (!next_thread) {
+        struct thread *t;
+        int has_joinable_threads = 0;
+        for (t = p->threads; t; t = t->next) {
+            if (t->magic == CTXT_MAGIC && t->joiner && t->joiner->magic == CTXT_MAGIC) {
+                has_joinable_threads = 1;
+                break;
+            }
+        }
+        
+        if (has_joinable_threads) {
+            TRACE_THREAD("FIND NEXT THREAD: Creating idle thread for joinable threads");
+            next_thread = get_idle_thread(p);
+        } else {
+            TRACE_THREAD("FIND NEXT THREAD: No threads available");
+        }
+    }
     return next_thread;
 }
 
@@ -471,7 +492,23 @@ void proc_thread_exit(void *retval, void *arg) {
     TRACE_THREAD("EXIT: Marking thread %d as exited", current->tid);
     atomic_thread_state_change(current, THREAD_STATE_EXITED);
 
-    if(tid > 0) {
+    // Special handling for idle thread exit
+    if (current->is_idle) {
+        TRACE_THREAD("EXIT: Idle thread %d is exiting", tid);
+        // Check if there are still threads that need joining
+        struct thread *t;
+        int has_joinable_threads = 0;
+        for (t = p->threads; t; t = t->next) {
+            if (t->magic == CTXT_MAGIC && t->joiner && t->joiner->magic == CTXT_MAGIC) {
+                has_joinable_threads = 1;
+                break;
+            }
+        }
+        
+        if (!has_joinable_threads) {
+            TRACE_THREAD("EXIT: Idle thread no longer needed, exiting");
+        }
+    } else if(tid > 0) {
         p->num_threads--;
     }
 
@@ -559,7 +596,7 @@ void proc_thread_exit(void *retval, void *arg) {
     // CRITICAL: Do NOT save context when exiting!
     // The exiting thread should never resume - just switch directly
     spl(sr);
-    target_ctx->regs[0] = 1;
+
     if((target_ctx->sr & 0x2000) == 0) leave_kernel();
     change_context(target_ctx);
     
@@ -584,8 +621,14 @@ static inline short should_schedule_thread(struct thread *current, struct thread
         return 1;
     }
 
-    /* Special case: thread0 is always preemptible by other threads */
-    if (current->tid == 0 && next->tid != 0) {
+    /* Special case: idle thread is always preemptible by normal threads */
+    if (current->is_idle && !next->is_idle) {
+        TRACE_THREAD("THREAD_SCHED (should_schedule_thread): Idle thread preempted by normal thread %d", next->tid);
+        return 1;
+    }
+    
+    /* Special case: thread0 is always preemptible by other non-idle threads */
+    if (current->tid == 0 && next->tid != 0 && !next->is_idle) {
         TRACE_THREAD("THREAD_SCHED (should_schedule_thread): thread0 is current, allowing switch to thread %d", next->tid);
         return 1;
     }
@@ -669,12 +712,12 @@ void thread_switch(struct thread *from, struct thread *to) {
         to->last_scheduled = get_system_ticks();
         
         TRACE_THREAD("SWITCH: Switching to thread %d (no source thread)", to->tid);
-        register unsigned short sr = splhigh();
+
         reset_thread_priority(to);
-        to_ctx->regs[0] = 1;
+
         if((to_ctx->sr & 0x2000) == 0) leave_kernel();
         change_context(to_ctx);
-        spl(sr);
+        TRACE_THREAD("SWITCH ERROR: Should not reach here");
         return;
     }
     
@@ -795,15 +838,16 @@ static void execute_thread_switch(struct thread_switch_context *ctx) {
     }
     
     // Handle context switch based on thread state
-    if ((ctx->from->wait_type & WAIT_SLEEP) || (ctx->from->wait_type & WAIT_JOIN) || ctx->from->state & THREAD_STATE_EXITED) {
+    if ((ctx->from->wait_type & WAIT_SLEEP) || (ctx->from->wait_type & WAIT_JOIN) || (ctx->from->state & THREAD_STATE_EXITED)) {
         TRACE_THREAD("SWITCH: Thread %d is sleeping, joining or waiting on semaphore, skipping switch", ctx->from->tid);
         // Sleeping thread path - direct context switch
         atomic_thread_state_change(ctx->to, THREAD_STATE_RUNNING);
         ctx->from->proc->current_thread = ctx->to;
         reset_thread_priority(ctx->to);
         reset_thread_switch_state();
+
         TRACE_THREAD("SWITCH: Switched to context for thread %d, sr = %x, ssp = %lx, usp = %lx, pc = %lx", ctx->to->tid, ctx->to_ctx->sr, ctx->to_ctx->ssp, ctx->to_ctx->usp, ctx->to_ctx->pc);
-        ctx->to_ctx->regs[0] = 1;
+
         if((ctx->to_ctx->sr & 0x2000) == 0) leave_kernel();
         change_context(ctx->to_ctx);
         
@@ -825,14 +869,18 @@ static void execute_thread_switch(struct thread_switch_context *ctx) {
                     ctx->from->tid, from_ctx->ssp, from_ctx->usp, from_ctx->pc);
         
         if (save_context(from_ctx) == 0) {
+            from_ctx->regs[0] = 1;
+
             TRACE_THREAD("SWITCH: FIRST TIME - Saved context successfully for thread %d, ssp = %lx, usp = %lx, pc = %lx, sr = %x, to = %d", ctx->from->tid, from_ctx->ssp, from_ctx->usp, from_ctx->pc, from_ctx->sr, ctx->to->tid);
-            // Only change state if not blocked on mutex/semaphore
-            if(ctx->to->state & THREAD_STATE_EXITED) {
-                TRACE_THREAD("SWITCH: Thread %d is exiting, skipping switch", ctx->to->tid);
-                atomic_thread_state_change(ctx->from, THREAD_STATE_RUNNING);
-                ctx->to = NULL;
-                return;
-            }
+            
+            // // Only change state if not blocked on mutex/semaphore
+            // if(ctx->to->state & THREAD_STATE_EXITED) {
+            //     TRACE_THREAD("SWITCH: Thread %d is exiting, skipping switch", ctx->to->tid);
+            //     atomic_thread_state_change(ctx->from, THREAD_STATE_RUNNING);
+            //     ctx->to = NULL;
+            //     return;
+            // }
+
             atomic_thread_state_change(ctx->to, THREAD_STATE_RUNNING);
             ctx->from->proc->current_thread = ctx->to;
 
@@ -841,9 +889,6 @@ static void execute_thread_switch(struct thread_switch_context *ctx) {
             reset_thread_switch_state();
 
             TRACE_THREAD("SWITCH: Switched to context for thread %d, ssp = %lx, usp = %lx, pc = %lx, sr = %x", ctx->to->tid, ctx->to_ctx->ssp, ctx->to_ctx->usp, ctx->to_ctx->pc, ctx->to_ctx->sr);
-            
-            // CRITICAL FIX: Set D0 to non-zero so save_context returns non-zero on restoration
-            ctx->to_ctx->regs[0] = 1;
             
             if((ctx->to_ctx->sr & 0x2000) == 0) {
                 TRACE_THREAD("SWITCH: Leaving kernel mode for thread %d", ctx->to->tid);
@@ -912,49 +957,24 @@ static int prepare_scheduling_decision(struct proc *p, struct scheduling_decisio
 #endif
     // Handle case where no next thread is found
     if (!decision->next_thread) {
-        // Try to find thread0 or create idle thread
+        // Try to find thread0 first
         struct thread *thread0 = get_main_thread(p);
         
-        if (thread0 && !(thread0->state & THREAD_STATE_EXITED)) {
+        if (thread0 && !(thread0->state & THREAD_STATE_EXITED) && (thread0->wait_type == WAIT_NONE)) {
             decision->next_thread = thread0;
             TRACE_THREAD("SCHED: Falling back to thread0");
-        } else if (decision->current_thread && 
-                  !(decision->current_thread->state & THREAD_STATE_BLOCKED)) {
-            TRACE_THREAD("SCHED: Continuing with current thread %d", 
-                        decision->current_thread->tid);
-                        decision->current_thread->last_scheduled = decision->decision_time;
+        } else if (decision->current_thread && !(decision->current_thread->state & THREAD_STATE_BLOCKED) && !decision->current_thread->is_idle) {
+            TRACE_THREAD("SCHED: Continuing with current thread %d",  decision->current_thread->tid);
+            decision->current_thread->last_scheduled = decision->decision_time;
             return 0; // No switch needed
-        } else if (p->sleep_queue) {
-            // If there are sleeping threads, create an idle thread
-            decision->next_thread = get_idle_thread(p);
-            TRACE_THREAD("SCHED: Created idle thread to wait for sleeping threads");
+        } else {
+            TRACE_THREAD("SCHED: No threads available");
+            return 0;            
         }
-    }
-    
-    // If no next thread found, nothing to do
-    if (!decision->next_thread) {
-        TRACE_THREAD("SCHED: No threads available");
-        return 0;
-    }
-    
-    // If next is current, look for another thread
-    if (decision->next_thread == decision->current_thread) {
-        struct thread *alt_next = decision->next_thread->next_ready;
-        while (alt_next && alt_next->state != THREAD_STATE_READY) {
-            alt_next = alt_next->next_ready;
-        }
-        
-        if (!alt_next) {
-            TRACE_THREAD("SCHED: No other ready threads available");
-            return 0;
-        }
-        
-        decision->next_thread = alt_next;
     }
     
     // Check if we should schedule next thread
-    decision->should_switch = should_schedule_thread(decision->current_thread, 
-                                                   decision->next_thread);
+    decision->should_switch = should_schedule_thread(decision->current_thread, decision->next_thread);
     TRACE_THREAD("SCHED: Should switch: %d", decision->should_switch);
     return decision->should_switch;
 }
@@ -1013,9 +1033,6 @@ static void execute_scheduling_decision(struct proc *p, struct scheduling_decisi
     // Update next thread state
     atomic_thread_state_change(decision->next_thread, THREAD_STATE_RUNNING);
     p->current_thread = decision->next_thread;
-    
-    // Record scheduling time for timeslice accounting
-    // decision->next_thread->last_scheduled = get_system_ticks();
 
     // Reschedule preemption timer if needed
     if (p->p_thread_timer.in_handler) {
@@ -1093,9 +1110,7 @@ static void thread_switch_timeout_handler(PROC *p, long arg) {
         // More aggressive recovery - try to restore a known good state
         if (p && p->current_thread && p->current_thread->magic == CTXT_MAGIC) {
             CONTEXT *ctx = get_thread_context(p->current_thread);
-            TRACE_THREAD("TIMEOUT: Attempting to restore current thread %d", 
-                        p->current_thread->tid);
-            ctx->regs[0] = 1;
+            TRACE_THREAD("TIMEOUT: Attempting to restore current thread %d",  p->current_thread->tid);
             if((ctx->sr & 0x2000) == 0) leave_kernel();
             change_context(ctx);
 

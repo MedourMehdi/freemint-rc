@@ -125,16 +125,18 @@ struct thread *get_highest_priority_thread(struct proc *p) {
     // Create priority bitmaps
     unsigned short rt_bitmap = 0;
     unsigned short normal_bitmap = 0;
+    unsigned short idle_bitmap = 0;
     
     // Build bitmaps from ready queue
-    TRACE_THREAD("get_highest_priority_thread: Scanning ready queue for process %d", p->pid);
     struct thread *t = p->ready_queue;
     while (t) {
         if (t->magic == CTXT_MAGIC && !(t->state & THREAD_STATE_EXITED)) {
             // Priority is already scaled when set
             unsigned short bit = 1 << t->priority;
             
-            if (t->policy == SCHED_FIFO || t->policy == SCHED_RR) {
+            if (t->is_idle) {
+                idle_bitmap |= bit;
+            } else if (t->policy == SCHED_FIFO || t->policy == SCHED_RR) {
                 rt_bitmap |= bit;
             } else {
                 normal_bitmap |= bit;
@@ -181,6 +183,24 @@ struct thread *get_highest_priority_thread(struct proc *p) {
             t = t->next_ready;
         }
     }
+    // Only consider idle threads if no normal threads are available
+    if (idle_bitmap) {
+        highest_pri = find_highest_priority_bit_word(idle_bitmap);
+        
+        // Find first idle thread with this priority
+        t = p->ready_queue;
+        while (t) {
+            if (t->magic == CTXT_MAGIC && 
+                !(t->state & THREAD_STATE_EXITED) &&
+                t->is_idle &&
+                t->priority == highest_pri) {
+                TRACE_THREAD("get_highest_priority_thread: idle_bitmap - Found idle thread %d with priority %d", t->tid, t->priority);
+                return t;
+            }
+            t = t->next_ready;
+        }
+    }
+    
     TRACE_THREAD("get_highest_priority_thread: No threads found");
     return NULL;
 }

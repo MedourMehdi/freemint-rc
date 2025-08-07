@@ -90,8 +90,8 @@ static long create_thread(struct proc *p, void *(*func)(void*), void *arg, void*
             sched_policy = attr->policy;
         }
         
-        // Handle priority (validate range)
-        if (attr->priority > 0) {
+        // Handle priority (validate range) - fix negative priority issue
+        if (attr->priority >= 0) {
             // Clamp priority to valid range
             thread_priority = MIN(MAX(attr->priority, 1), MAX_THREAD_PRIORITY);
         }
@@ -133,7 +133,8 @@ static long create_thread(struct proc *p, void *(*func)(void*), void *arg, void*
         TRACE_THREAD("Using attribute priority %d for thread %d", thread_priority, t->tid);
     } else {
         /* Map process priority to thread priority (keep positive values) */
-        t->priority = MAX(scale_thread_priority(-p->pri), 1);
+        int proc_priority = (p->pri < 0) ? -p->pri : p->pri;
+        t->priority = MAX(scale_thread_priority(proc_priority), 1);
         t->original_priority = t->priority;
     }
     
@@ -235,15 +236,16 @@ static void proc_thread_start(void) {
     struct thread *t;
     struct proc *p;
 
-    t = CURTHREAD;
-    TRACE_THREAD("START: Thread trampoline started, thread pointer %p, tid %d", t, t->tid);
+    p = curproc;
+    t = p ? p->current_thread : NULL;
+    
+    TRACE_THREAD("START: Thread trampoline started, thread pointer %p, tid %d", t, t ? t->tid : -1);
     
     if (!t || t->magic != CTXT_MAGIC) {
         TRACE_THREAD("START: Invalid thread pointer %p or magic %lx", t, t ? t->magic : 0);
         return;
     }
     
-    p = t->proc;
     if (!p) {
         TRACE_THREAD("START: No process for thread %d", t->tid);
         return;
@@ -252,7 +254,6 @@ static void proc_thread_start(void) {
     TRACE_THREAD("START: Current thread is %d", t->tid);
     
     // CRITICAL: Initialize last_scheduled when thread first starts
-    t->last_scheduled = get_system_ticks();
     TRACE_THREAD("START: Initialized last_scheduled=%lu for thread %d", t->last_scheduled, t->tid);
     
     // Start preemption timer if needed
@@ -304,7 +305,8 @@ static void init_thread_context(struct thread *t, void *(*func)(void*), void *ar
     t->ctxt[CURRENT].ssp = ssp;
     t->ctxt[CURRENT].usp = usp;
     t->ctxt[CURRENT].pc = (unsigned long)proc_thread_start;
-    t->ctxt[CURRENT].sr = 0x2000;  // SUPERVISOR MODE
+    // t->ctxt[CURRENT].sr = 0x2000;  // SUPERVISOR MODE
+    t->ctxt[CURRENT].sr = 0x0000;  // USER MODE
     
     t->ctxt[CURRENT].regs[0] = 0;
     
@@ -314,7 +316,9 @@ static void init_thread_context(struct thread *t, void *(*func)(void*), void *ar
     
     // Copy to SYSCALL context
     memcpy(&t->ctxt[SYSCALL], &t->ctxt[CURRENT], sizeof(struct context));
-    
+
+    t->last_scheduled = get_system_ticks();
+
     TRACE_THREAD("INIT CONTEXT: Thread %d initialized for USER MODE", t->tid);
     TRACE_THREAD("  SSP = %lx, USP = %lx, PC = %lx, SR = %04x", 
                 t->ctxt[CURRENT].ssp, t->ctxt[CURRENT].usp, 

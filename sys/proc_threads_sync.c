@@ -181,18 +181,19 @@ long proc_thread_join(long tid, void **retval)
     current->wait_type |= WAIT_JOIN;
     current->join_wait_obj = target;
     current->join_retval = retval;  // Store the pointer where to put the return value
-TRACE_THREAD("JOIN: Thread %d waiting for thread %d to exit, join_retval=%p",
-            current->tid, target->tid, retval);
+    TRACE_THREAD("JOIN: Thread %d waiting for thread %d to exit, join_retval=%p", current->tid, target->tid, retval);
     TRACE_THREAD_JOIN(current, target);
     
     // Block the current thread
     atomic_thread_state_change(current, THREAD_STATE_BLOCKED);
 
     remove_from_ready_queue(current);
-    
-    if (save_context(get_thread_context(current)) == 0) {
+    spl(sr);
+    CONTEXT *ctx = get_thread_context(current);
+    if (save_context(ctx) == 0) {
+        ctx->regs[0] = 1;
         // First time through - going to sleep
-        spl(sr);
+        // spl(sr);
         
         // Schedule another thread
         proc_thread_schedule();
