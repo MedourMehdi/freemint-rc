@@ -118,6 +118,8 @@ kthread_create_v(struct proc *p, void _cdecl (*func)(void *), void *arg,
 		p2->ctxt[SYSCALL].usp = p2->sysstack;
 		p2->ctxt[SYSCALL].term_vec = (long) rts;
 
+		p2->current_thread = NULL;
+
 		*((long *)(p2->ctxt[CURRENT].usp + 4)) = (long) arg;
 		*((long *)(p2->ctxt[SYSCALL].usp + 4)) = (long) arg;
 

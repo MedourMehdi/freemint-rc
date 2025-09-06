@@ -40,7 +40,11 @@ void *thread_func(void *arg) {
     // Perform context switches
     for (i = 0; i < data->iterations; i++) {
         data->counter++;
+#ifdef __APPLE__
+	    pthread_yield_np();
+#else
         pthread_yield(); // Force a context switch
+#endif
     }
     
     // Signal completion
@@ -48,8 +52,7 @@ void *thread_func(void *arg) {
     (*data->threads_done)++;
     pthread_cond_signal(data->barrier_cond);
     pthread_mutex_unlock(data->barrier_mutex);
-    
-    return NULL;
+    pthread_exit(NULL);
 }
 
 int main(int argc, char *argv[]) {
@@ -127,7 +130,11 @@ int main(int argc, char *argv[]) {
     // Warm up the system
     printf("Warming up...\n");
     for (i = 0; i < 1000; i++) {
+#ifdef __APPLE__
+        pthread_yield_np();
+#else
         pthread_yield();
+#endif
     }
     
     // Start the benchmark

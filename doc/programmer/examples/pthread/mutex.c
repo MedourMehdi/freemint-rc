@@ -37,6 +37,7 @@ void *mutex_test_thread(void *arg) {
         printf("Failed to lock mutex in thread %d\n", thread_num);
     }
     done += 1;
+    pthread_exit(NULL);
     return NULL;
 }
 
@@ -63,6 +64,7 @@ void *semaphore_test_thread(void *arg) {
         printf("Failed to acquire semaphore in thread %d\n", thread_num);
     }
     done += 1;
+    pthread_exit(NULL);
     return NULL;
 }
 

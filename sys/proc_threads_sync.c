@@ -188,13 +188,22 @@ long proc_thread_join(long tid, void **retval)
     atomic_thread_state_change(current, THREAD_STATE_BLOCKED);
 
     remove_from_ready_queue(current);
+
     spl(sr);
+
     CONTEXT *ctx = get_thread_context(current);
+
+    TRACE_THREAD("JOIN - PRE-SAVE - USED CONTEXT: Thread %d context - SSP=%lx, USP=%lx, PC=%lx", current->tid, ctx->ssp, ctx->usp, ctx->pc); 
+
     if (save_context(ctx) == 0) {
+
         ctx->regs[0] = 1;
+
+        TRACE_THREAD("JOIN: SAVED CURRENT Context for thread %d saved, SR=%x, SSP=%lx, USP=%lx, PC=%lx",
+                current->tid, ctx->sr, ctx->ssp, ctx->usp, ctx->pc);
+        // memcpy(&current->ctxt[SYSCALL], &current->proc->ctxt[SYSCALL], sizeof(CONTEXT));
+        TRACE_THREAD("JOIN: SAVED SYSCALL CONTEXT: Thread %d context - SSP=%lx, USP=%lx, PC=%lx", current->tid, current->ctxt[SYSCALL].ssp, current->ctxt[SYSCALL].usp, current->ctxt[SYSCALL].pc);
         // First time through - going to sleep
-        // spl(sr);
-        
         // Schedule another thread
         proc_thread_schedule();
         
@@ -202,6 +211,10 @@ long proc_thread_join(long tid, void **retval)
         TRACE_THREAD("JOIN: ERROR - Returned from proc_thread_schedule() in join path!");
         return -1;
     }
+
+    TRACE_THREAD("JOIN - Second time - CONTEXT: Thread %d context - SSP=%lx, USP=%lx, PC=%lx", current->tid, ctx->ssp, ctx->usp, ctx->pc);
+    TRACE_THREAD("JOIN: Second time context, THREAD SYSCALL context for thread %d SR = %x, SSP=%lx, USP=%lx, PC=%lx", current->tid, current->ctxt[SYSCALL].sr, current->ctxt[SYSCALL].ssp, current->ctxt[SYSCALL].usp, current->ctxt[SYSCALL].pc);                     
+    TRACE_THREAD("JOIN: Second time context, PROC SYSCALL context for proc %d SR = %x, SSP=%lx, USP=%lx, PC=%lx", current->proc->pid, current->proc->ctxt[SYSCALL].sr, current->proc->ctxt[SYSCALL].ssp, current->proc->ctxt[SYSCALL].usp, current->proc->ctxt[SYSCALL].pc);                
     
     // Second time through - waking up after target thread exited
     sr = splhigh();
@@ -222,8 +235,8 @@ long proc_thread_join(long tid, void **retval)
             // Go back to waiting
             atomic_thread_state_change(current, THREAD_STATE_BLOCKED);
             
-            // Schedule another thread and continue waiting
             spl(sr);
+            // Schedule another thread and continue waiting
             proc_thread_schedule();
             return 0;  // Will never reach here
         }
@@ -261,9 +274,14 @@ long proc_thread_join(long tid, void **retval)
     current->wait_type &= ~WAIT_JOIN;
     current->join_wait_obj = NULL;
     
-    TRACE_THREAD("JOIN: Thread %d successfully joined thread %d", current->tid, tid);
+    TRACE_THREAD("JOIN: Thread %d successfully joined thread %ld", current->tid, tid);
     
     spl(sr);
+
+    // CONTEXT *ctx = get_thread_context(current);
+    TRACE_THREAD("JOIN: Before return, CURRENT context for thread %d, SR %x, PC %lx, SSP %lx, USP %lx", current->tid, ctx->sr, ctx->pc, ctx->ssp, ctx->usp);
+    TRACE_THREAD("JOIN: Before return, PROC SYSCALL context for thread %d, SR %x, PC %lx, SSP %lx, USP %lx", current->tid, current->proc->ctxt[SYSCALL].sr, current->proc->ctxt[SYSCALL].pc, current->proc->ctxt[SYSCALL].ssp, current->proc->ctxt[SYSCALL].usp);
+
     return 0;
 }
 

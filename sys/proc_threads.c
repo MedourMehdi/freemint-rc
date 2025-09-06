@@ -37,9 +37,8 @@ typedef struct {
     int priority;
 } pthread_attr_t;
 
-
-static long create_thread(struct proc *p, void *(*func)(void*), void *arg, void *stack_ptr);
 static void proc_thread_start(void);
+static long create_thread(struct proc *p, void *(*func)(void*), void *arg, void *stack_ptr);
 static void init_main_thread_context(struct proc *p);
 static void init_thread_context(struct thread *t, void *(*func)(void*), void *arg);
 static struct thread* create_idle_thread(struct proc *p);
@@ -60,6 +59,57 @@ static void kernel_pthread_syscall(unsigned long subsystem, unsigned long op, un
     );
 }
 
+static void proc_thread_start(void) {
+    struct thread *t;
+    struct proc *p;
+
+    p = curproc;
+    t = p ? p->current_thread : NULL;
+    
+    TRACE_THREAD("START: Thread trampoline started, thread pointer %p, tid %d", t, t ? t->tid : -1);
+    
+    if (!t || t->magic != CTXT_MAGIC) {
+        TRACE_THREAD("START: Invalid thread pointer %p or magic %lx", t, t ? t->magic : 0);
+        return;
+    }
+    
+    if (!p) {
+        TRACE_THREAD("START: No process for thread %d", t->tid);
+        return;
+    }
+    
+    TRACE_THREAD("START: Current thread is %d", t->tid);
+    
+    // CRITICAL: Initialize last_scheduled when thread first starts
+    TRACE_THREAD("START: Initialized last_scheduled=%lu for thread %d", t->last_scheduled, t->tid);
+    
+    // Start preemption timer if needed
+    if (p->num_threads > 1 && !p->p_thread_timer.enabled) {
+        TRACE_THREAD("START: Starting thread timer for process %d (thread %d)", p->pid, t->tid);
+        thread_timer_start(p, t->tid);
+    }
+   
+    void* (*func)(void*) = t->func;
+    void *arg = t->arg;
+    void *result = NULL;
+
+    TRACE_THREAD("START: Thread function=%p, arg=%p", func, arg);
+    
+    // Call the function
+    if (func) {
+        TRACE_THREAD("START: Calling thread function");
+        result = func(arg);  // Capture return value in user mode
+        TRACE_THREAD("START: Thread function returned");
+    }
+
+    if (t && t->magic == CTXT_MAGIC) {
+        TRACE_THREAD("START: Thread %d finished execution, returning result %p", t->tid, result);
+        kernel_pthread_syscall(P_THREAD_CTRL, THREAD_CTRL_EXIT, (unsigned long)result, 0);
+        // proc_thread_exit(result, NULL); // Should never return -> Privilege violation
+    }
+    return;
+}
+
 // Thread creation syscall
 long _cdecl proc_thread_create(void *(*func)(void*), void *arg, void *attr) {    
     TRACE_THREAD("CREATETHREAD: func=%p arg=%p attr=%p", func, arg, attr);
@@ -76,8 +126,9 @@ static long create_thread(struct proc *p, void *(*func)(void*), void *arg, void*
     short thread_priority = -1;  // -1 means use default priority calculation
 
     pthread_attr_t *attr = (pthread_attr_t *)attr_ptr;
-    
+
     unsigned short i;
+
     // Extract attributes if provided
     if (attr) {
         if (attr->stacksize > 0) {
@@ -145,11 +196,12 @@ static long create_thread(struct proc *p, void *(*func)(void*), void *arg, void*
 
     // t->priority_boost = (t->tid > 0) ? 1 : 0;
     t->priority_boost = 0;
-    if (t->tid > 0) {
-        t->priority = THREAD_CREATION_PRIORITY_BOOST;
-        TRACE_THREAD("Applied priority boost to new thread %d: priority %d", 
-                    t->tid, t->priority);        
-    }
+
+    // if (t->tid > 0) {
+    //     t->priority = THREAD_CREATION_PRIORITY_BOOST;
+    //     TRACE_THREAD("Applied priority boost to new thread %d: priority %d", 
+    //                 t->tid, t->priority);        
+    // }
 
     /* Initialize thread-specific data */
     t->tsd_data = NULL;
@@ -232,60 +284,6 @@ static long create_thread(struct proc *p, void *(*func)(void*), void *arg, void*
     return t->tid;
 }
 
-static void proc_thread_start(void) {
-    struct thread *t;
-    struct proc *p;
-
-    p = curproc;
-    t = p ? p->current_thread : NULL;
-    
-    TRACE_THREAD("START: Thread trampoline started, thread pointer %p, tid %d", t, t ? t->tid : -1);
-    
-    if (!t || t->magic != CTXT_MAGIC) {
-        TRACE_THREAD("START: Invalid thread pointer %p or magic %lx", t, t ? t->magic : 0);
-        return;
-    }
-    
-    if (!p) {
-        TRACE_THREAD("START: No process for thread %d", t->tid);
-        return;
-    }
-    
-    TRACE_THREAD("START: Current thread is %d", t->tid);
-    
-    // CRITICAL: Initialize last_scheduled when thread first starts
-    TRACE_THREAD("START: Initialized last_scheduled=%lu for thread %d", t->last_scheduled, t->tid);
-    
-    // Start preemption timer if needed
-    if (p->num_threads > 1 && !p->p_thread_timer.enabled) {
-        TRACE_THREAD("START: Starting thread timer for process %d (thread %d)", p->pid, t->tid);
-        thread_timer_start(p, t->tid);
-    }
-   
-    // Get function and argument from thread structure
-    void* (*func)(void*) = t->func;
-    void *arg = t->arg;
-    void *result = NULL;
-    TRACE_THREAD("START: Thread function=%p, arg=%p", func, arg);
-    
-    // Call the function
-    if (func) {
-        TRACE_THREAD("START: Calling thread function");
-        result = func(arg);  // Capture return value in user mode
-        TRACE_THREAD("START: Thread function returned");
-    }
-    if (t && t->magic == CTXT_MAGIC) {
-        TRACE_THREAD("START: Thread %d finished execution, returning result %p", t->tid, result);
-        TRACE_THREAD_EXIT(t, result);
-        kernel_pthread_syscall(P_THREAD_CTRL, THREAD_CTRL_EXIT, (unsigned long)result, 0);
-
-    }
-    
-    // Should never reach here
-    TRACE_THREAD("START: Thread didn't exit properly!");
-    while(1) { /* hang */ }
-}
-
 static void init_thread_context(struct thread *t, void *(*func)(void*), void *arg) {
     TRACE_THREAD("INIT CONTEXT: Initializing context for thread %d", t->tid);
     
@@ -297,32 +295,36 @@ static void init_thread_context(struct thread *t, void *(*func)(void*), void *ar
     t->func = func;
     t->arg = arg;
     
-    // Set up stack pointers
-    unsigned long usp = ((unsigned long)t->stack_top - 256) & ~0x3;
-    unsigned long ssp = ((unsigned long)t->stack_top - 512) & ~0x3;
+    memcpy(&t->ctxt[CURRENT], &t->proc->ctxt[CURRENT], sizeof(struct context));
+    memcpy(&t->ctxt[SYSCALL], &t->proc->ctxt[SYSCALL], sizeof(struct context));
+
+    // Set up stack pointers - use same USP for both contexts
+    unsigned long usp = ((unsigned long)t->stack_top - 512) & ~0x3;
+    unsigned long ssp = ((unsigned long)t->stack_top - 1024) & ~0x3; 
     
-    // Set up initial context for SUPERVISOR MODE
+    // Set up initial context
     t->ctxt[CURRENT].ssp = ssp;
     t->ctxt[CURRENT].usp = usp;
+
     t->ctxt[CURRENT].pc = (unsigned long)proc_thread_start;
-    // t->ctxt[CURRENT].sr = 0x2000;  // SUPERVISOR MODE
-    t->ctxt[CURRENT].sr = 0x0000;  // USER MODE
+    t->ctxt[CURRENT].sr = 0x0000;
+    // *((long *)(t->ctxt[CURRENT].usp + 4)) = (long) arg;
     
-    t->ctxt[CURRENT].regs[0] = 0;
-    
-    // Copy memory management from process
-    memcpy(&t->ctxt[CURRENT].crp, &t->proc->ctxt[CURRENT].crp, sizeof(t->ctxt[CURRENT].crp));
-    memcpy(&t->ctxt[CURRENT].tc, &t->proc->ctxt[CURRENT].tc, sizeof(t->ctxt[CURRENT].tc));
-    
-    // Copy to SYSCALL context
-    memcpy(&t->ctxt[SYSCALL], &t->ctxt[CURRENT], sizeof(struct context));
+    t->ctxt[SYSCALL].ssp = ssp;
+    t->ctxt[SYSCALL].usp = usp;
+    t->ctxt[SYSCALL].pc = (unsigned long)proc_thread_start;
+    t->ctxt[SYSCALL].sr  = 0x0000;
+    // *((long *)(t->ctxt[SYSCALL].usp + 4)) = (long) arg;
 
     t->last_scheduled = get_system_ticks();
 
     TRACE_THREAD("INIT CONTEXT: Thread %d initialized for USER MODE", t->tid);
-    TRACE_THREAD("  SSP = %lx, USP = %lx, PC = %lx, SR = %04x", 
+    TRACE_THREAD(" CURRENT CONTEXT: SSP = %lx, USP = %lx, PC = %lx, SR = %04x", 
                 t->ctxt[CURRENT].ssp, t->ctxt[CURRENT].usp, 
                 t->ctxt[CURRENT].pc, t->ctxt[CURRENT].sr);
+    TRACE_THREAD(" SYSCALL CONTEXT: SSP = %lx, USP = %lx, PC = %lx, SR = %04x", 
+                t->ctxt[SYSCALL].ssp, t->ctxt[SYSCALL].usp, 
+                t->ctxt[SYSCALL].pc, t->ctxt[SYSCALL].sr);                
 }
 
 static void init_main_thread_context(struct proc *p) {
@@ -335,7 +337,6 @@ static void init_main_thread_context(struct proc *p) {
     TRACE_THREAD("KMALLOC: Allocated thread0 structure at %p for process %d", t0, p->pid);
     TRACE_THREAD("INIT CONTEXT: Initializing thread0 for process %d", p->pid);
     
-    // memset(t0, 0, sizeof(struct thread));
     mint_bzero (t0, sizeof(*t0));
     t0->tid = 0;
     t0->proc = p;
@@ -352,14 +353,14 @@ static void init_main_thread_context(struct proc *p) {
     t0->stack = p->stack;
     t0->stack_top = (char*)p->stack + STKSIZE;
     t0->stack_magic = STACK_MAGIC;
-    
-    // // Copy process context to thread context
-    // memcpy(&t0->ctxt[CURRENT], &p->ctxt[CURRENT], sizeof(CONTEXT));
-    // memcpy(&t0->ctxt[SYSCALL], &p->ctxt[SYSCALL], sizeof(CONTEXT));
 
-    /* Point to process context instead of copying */
-    t0->ctxt[CURRENT] = p->ctxt[CURRENT];
-    t0->ctxt[SYSCALL] = p->ctxt[SYSCALL];
+    // Initialize thread0 context from process context
+    memcpy(&t0->ctxt[CURRENT], &p->ctxt[CURRENT], sizeof(CONTEXT));
+    memcpy(&t0->ctxt[SYSCALL], &p->ctxt[SYSCALL], sizeof(CONTEXT));
+
+    // Ensure thread0 uses its own context, not process context directly
+    t0->ctxt[CURRENT].regs[0] = 0;
+    t0->ctxt[SYSCALL].regs[0] = 0;
 
     // Link into process
     t0->next = NULL;
@@ -395,7 +396,8 @@ static void init_main_thread_context(struct proc *p) {
     p->total_threads = 1;
 
     atomic_thread_state_change(t0, THREAD_STATE_RUNNING);
-    TRACE_THREAD("INIT CONTEXT: Thread id. %d initialized for process %d, ssp %lx, usp %lx, pc %lx",t0->tid, p->pid, t0->ctxt[CURRENT].ssp, t0->ctxt[CURRENT].usp, t0->ctxt[CURRENT].pc);
+    TRACE_THREAD("INIT CONTEXT: Thread id. %d initialized for process %d, CURRENT -> ssp %lx, usp %lx, pc %lx",t0->tid, p->pid, t0->ctxt[CURRENT].ssp, t0->ctxt[CURRENT].usp, t0->ctxt[CURRENT].pc);
+    TRACE_THREAD("INIT CONTEXT: Thread id. %d initialized for process %d, SYSCALL -> ssp %lx, usp %lx, pc %lx",t0->tid, p->pid, t0->ctxt[SYSCALL].ssp, t0->ctxt[SYSCALL].usp, t0->ctxt[SYSCALL].pc);    
     TRACE_THREAD("INIT CONTEXT: Starting thread timer for process %d", p->pid);
     thread_timer_start(t0->proc, t0->tid);
 }
@@ -406,24 +408,16 @@ CONTEXT* get_thread_context(struct thread *t) {
         return NULL;
     }
 
-    // Pour thread0, utiliser le contexte process
-    if (t->tid == 0) {
-        if (!t->proc || t->proc->magic != CTXT_MAGIC) {
-            TRACE_THREAD("GET_CTX ERROR: Invalid process magic for thread0");
-            return NULL;
-        }
-        TRACE_THREAD("GET_CTX Using process context for thread0");
-        return &t->proc->ctxt[CURRENT];
-    }
-
     // If thread is handling a signal, return the signal context
     if (t->t_sig_in_progress) {
         TRACE_THREAD("GET_CTX: Using signal context for thread %d", t->tid);
         return &t->sig_ctx;
     }
 
-    TRACE_THREAD("GET_CTX: Using current context for thread %d", t->tid);
-    return &t->ctxt[CURRENT];
+    TRACE_THREAD("GET_CTX: CURRENT context for thread %d, SR %x, PC %lx, SSP %lx, USP %lx", t->tid, t->ctxt[CURRENT].sr, t->ctxt[CURRENT].pc, t->ctxt[CURRENT].ssp, t->ctxt[CURRENT].usp);
+    TRACE_THREAD("GET_CTX: SYSCALL context for thread %d, SR %x, PC %lx, SSP %lx, USP %lx", t->tid, t->ctxt[SYSCALL].sr, t->ctxt[SYSCALL].pc, t->ctxt[SYSCALL].ssp, t->ctxt[SYSCALL].usp);
+    
+    return &t->ctxt[SYSCALL];
 }
 
 void proc_thread_cleanup_process(struct proc *pcurproc) {

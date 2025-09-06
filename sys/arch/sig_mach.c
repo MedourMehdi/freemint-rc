@@ -53,7 +53,6 @@ sendsig(ushort sig)
 	CONTEXT *call, contexts[2];
 
 	/* Variables to track original thread state */
-	struct thread *original_thread = NULL;
 	void *stack_base_for_validation;
 	size_t stack_size_for_validation;
 
@@ -63,21 +62,9 @@ sendsig(ushort sig)
 	assert(curproc->stack_magic == STACK_MAGIC);
 
 	/* Store original thread info BEFORE switching */
-	if (curproc->current_thread && curproc->current_thread->tid != 0) {
-		original_thread = curproc->current_thread;
-		/* For stack validation, we need to consider the current thread's stack */
-		stack_base_for_validation = original_thread->stack;
-		stack_size_for_validation = original_thread->stack_size;
-	} else {
-		/* Use process stack for validation */
 		stack_base_for_validation = curproc->stack;
 		stack_size_for_validation = STKSIZE;
-	}
 
-	/* Switch to main thread for multi-threaded processes */
-	if (original_thread) {
-		sys_p_thread_ctrl(THREAD_CTRL_SWITCH_TO_MAIN, 0, 0);
-	}
 
 	/* another kludge: there is one case in which the p_sigreturn
 	 * mechanism is invoked by the kernel, namely when the user
@@ -268,11 +255,6 @@ sendsig(ushort sig)
 	curproc->ctxt[SYSCALL] = oldsysctxt;
 	assert(curproc->magic == CTXT_MAGIC);
 
-	/* If we originally switched from a thread, we should switch back */
-	if (original_thread) {
-		/* Switch back to the original thread */
-		sys_p_thread_ctrl(THREAD_CTRL_SWITCH_TO_THREAD, original_thread->tid, 0);
-	}
 
 # undef oldsysctxt
 # undef newcurrent

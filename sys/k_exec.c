@@ -62,6 +62,10 @@
 # include "timeout.h"
 # include "util.h"
 
+#ifdef DEBUG_THREAD
+#include "proc_threads_debug.h"
+#endif
+
 #define PE_THREAD       107   /* Create a thread */
 
 void rts (void);
@@ -281,7 +285,9 @@ sys_pexec(short mode, const void *p1, const void *p2, const void *p3)
 				void *(*func)(void*) = (void *(*)(void*)) (unsigned long) p1;
 				void *arg = (void*) (unsigned long) p2;
 				void *attr = (void*) (unsigned long) p3;
-				
+				#ifdef DEBUG_THREAD
+				TRACE_THREAD("PE_THREAD: PROC SYSCALL SR %x, PC %lx, SSP %lx, USP %lx", curproc->ctxt[SYSCALL].sr, curproc->ctxt[SYSCALL].pc, curproc->ctxt[SYSCALL].ssp, curproc->ctxt[SYSCALL].usp);
+				#endif
 				return proc_thread_create(func, arg, attr);
 			}
 		default:

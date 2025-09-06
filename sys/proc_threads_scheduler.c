@@ -67,12 +67,40 @@ struct scheduling_decision {
     unsigned char should_switch : 1; // 1-bit boolean
 };
 
-
 /* Forward declarations for new functions */
 static void prepare_thread_switch(struct thread_switch_context *ctx);
 static void execute_thread_switch(struct thread_switch_context *ctx);
 static int prepare_scheduling_decision(struct proc *p, struct scheduling_decision *decision);
 static void execute_scheduling_decision(struct proc *p, struct scheduling_decision *decision);
+
+/*
+ * SYSCALL context mirroring helpers
+ *
+ * syscall.S only ever reads/writes p->ctxt[SYSCALL].
+ * For thread N>0 we keep a per-thread shadow in t->ctxt[SYSCALL].
+ * When a thread is RUNNING, p->ctxt[SYSCALL] must mirror that thread.
+ */
+static inline void sync_sys_from_proc(struct thread *t)
+{
+    if (!t || !t->proc) return;
+    TRACE_THREAD("SYNC PROC: Mirroring process context for thread %d", t->tid);
+    memcpy(&t->ctxt[SYSCALL], &t->proc->ctxt[SYSCALL], sizeof(CONTEXT));
+}
+
+static inline void sync_sys_to_proc(struct thread *t)
+{
+    if (!t || !t->proc) return;
+    // if (t->proc->in_dos == 0) t->proc->in_dos = 1;
+    TRACE_THREAD("SYNC SYS: Mirroring syscall context for thread %d", t->tid);
+    memcpy(&t->proc->ctxt[SYSCALL], &t->ctxt[SYSCALL], sizeof(CONTEXT));
+}
+
+static inline void sync_sys_switch_pair(struct thread *from, struct thread *to)
+{
+    if (from) sync_sys_from_proc(from);
+    if (to)   sync_sys_to_proc(to);
+}
+
 
 /**
  * Thread preemption handler
@@ -161,7 +189,7 @@ void proc_thread_schedule(void) {
         TRACE_THREAD("SCHED: No scheduling decision made, returning");
         return;
     }
-    
+
     // Execute the scheduling decision in minimal critical section
     execute_scheduling_decision(p, &decision);
     TRACE_THREAD("SCHED: Should not reach here, scheduling decision executed");
@@ -487,7 +515,9 @@ void proc_thread_exit(void *retval, void *arg) {
     TRACE_THREAD("EXIT: Removing thread %d from wait queues and ready queue", current->tid);
     remove_thread_from_wait_queues(current);
     remove_from_ready_queue(current);
-    
+
+    sync_sys_from_proc(current); /* Mainly for Thread0 ? */
+
     // Mark thread as exited
     TRACE_THREAD("EXIT: Marking thread %d as exited", current->tid);
     atomic_thread_state_change(current, THREAD_STATE_EXITED);
@@ -529,83 +559,58 @@ void proc_thread_exit(void *retval, void *arg) {
     }
     
     // Find next thread to run
-    CONTEXT *target_ctx = NULL;
     struct thread *next_thread = find_next_thread_to_run(p);
     TRACE_THREAD("EXIT: Found next thread %d to run after exit", 
                 next_thread ? next_thread->tid : -1);
 
-    
-    if (next_thread){
-        // Check if the next thread is cancellable
-        TRACE_THREAD("EXIT: Checking if next thread %d is cancellable", next_thread->tid);
-        check_thread_cancellation(next_thread);
-    }
-    // If we found a valid next thread, prepare to switch to it
-    if (next_thread && next_thread->magic == CTXT_MAGIC && !(next_thread->state & THREAD_STATE_EXITED)) {
-        TRACE_THREAD("EXIT: Will switch to thread %d", next_thread->tid);
-        atomic_thread_state_change(next_thread, THREAD_STATE_RUNNING);
-        p->current_thread = next_thread;
-        target_ctx = get_thread_context(next_thread);
-        if (!target_ctx) {
-            TRACE_THREAD("EXIT ERROR: Could not get context for thread %d", next_thread->tid);
-            next_thread = NULL;
-        } else {
-            reset_thread_priority(next_thread);
-            TRACE_THREAD("EXIT: Switching to thread %d context, PC=%lx", 
-                        next_thread->tid, target_ctx->pc);
-        }
-    }
-
 #if THREAD_DEBUG_LEVEL >= THREAD_DEBUG_VERBOSE
-    if (!target_ctx) {
+    if (!next_thread) {
         TRACE_THREAD("EXIT: Checking for orphaned threads");
         check_orphaned_threads(p);
         // Try to find an orphaned thread to run
         TRACE_THREAD("EXIT: Finding next thread to run after checking for orphans");
         next_thread = find_next_thread_to_run(p);
-
-        if (next_thread && next_thread->magic == CTXT_MAGIC && 
-            !(next_thread->state & THREAD_STATE_EXITED)) {
-            TRACE_THREAD("EXIT: Found orphaned thread %d to run", next_thread->tid);
-            atomic_thread_state_change(next_thread, THREAD_STATE_RUNNING);
-            p->current_thread = next_thread;
-            target_ctx = get_thread_context(next_thread);
-        }
     }
-#endif
-
-    // If no valid thread found, use process context
-    if (!target_ctx) {
-        TRACE_THREAD("EXIT: No next thread, returning to process context");
-        p->current_thread = get_main_thread(p);
-        target_ctx = get_thread_context(p->current_thread);
-    }
+#endif                
     
+    if (!next_thread) {
+        TRACE_THREAD("EXIT: Selecting Thread 0 as next thread to run");
+        next_thread = get_main_thread(p);
+    }
+
+    if (next_thread){
+        // Check if the next thread is cancellable
+        TRACE_THREAD("EXIT: Checking if next thread %d is cancellable", next_thread->tid);
+        check_thread_cancellation(next_thread);
+    }
+
+    // If we found a valid next thread, prepare to switch to it
+    if (next_thread && next_thread->magic == CTXT_MAGIC && !(next_thread->state & THREAD_STATE_EXITED)) {
+        TRACE_THREAD("EXIT: Will switch to thread %d", next_thread->tid);
+        atomic_thread_state_change(next_thread, THREAD_STATE_RUNNING);
+    }
+
     // Clean up thread resources
     TRACE_THREAD("EXIT: Cleaning up resources for exiting thread %d", tid);
+    TRACE_THREAD("EXIT: Asked to exit thread %d, CURRENT ctxt SR %x, PC %lx, USP %lx, SSP %lx", current->tid, current->ctxt[CURRENT].sr, current->ctxt[CURRENT].pc, current->ctxt[CURRENT].usp, current->ctxt[CURRENT].ssp);
+    TRACE_THREAD("EXIT: Asked to exit thread %d, SYSCALL ctxt SR %x, PC %lx, USP %lx, SSP %lx", current->tid, current->ctxt[SYSCALL].sr, current->ctxt[SYSCALL].pc, current->ctxt[SYSCALL].usp, current->ctxt[SYSCALL].ssp);
     cleanup_thread_resources(p, current, tid);
     
     TRACE_THREAD("Thread %d exited", tid);
     
     thread_exit_in_progress = 0;
     exit_owner_tid = -1;
-    
-    // Switch to target context
-    TRACE_THREAD("EXIT: Switching to target context, sr = %x, ssp = %lx, usp = %lx, pc = %lx", target_ctx->sr, target_ctx->ssp, target_ctx->usp, target_ctx->pc);
-    
-    // CRITICAL: Do NOT save context when exiting!
-    // The exiting thread should never resume - just switch directly
-    spl(sr);
 
-    if((target_ctx->sr & 0x2000) == 0) leave_kernel();
-    change_context(target_ctx);
+    /* ---- SYSCALL context sync across exit handoff ---- */
+    if (current->tid == 0) sync_sys_from_proc(current);
+    if (next_thread) sync_sys_to_proc(next_thread);
+    p->current_thread = next_thread;
+    spl(sr);
+    TRACE_THREAD("SWICTH: IN_DOS %x, IN_KERNEL %x", CURTHREAD->proc->in_dos, in_kernel);
+    thread_switch(NULL, next_thread);
     
     // Should NEVER reach here - if we do, it's a critical error
     TRACE_THREAD("CRITICAL ERROR: Returned from change_context after thread exit!");
-    
-    // Try to recover by scheduling another thread
-
-    proc_thread_schedule();
 }
 
 static inline short should_schedule_thread(struct thread *current, struct thread *next) {
@@ -699,7 +704,7 @@ static inline short should_schedule_thread(struct thread *current, struct thread
 
 void thread_switch(struct thread *from, struct thread *to) {
     struct thread_switch_context ctx = {0};
-    
+    TRACE_THREAD("SWITCH: In function thread_switch");
     // Fast validation first
     if (!to) {
         TRACE_THREAD("SWITCH: Invalid destination thread pointer");
@@ -714,6 +719,10 @@ void thread_switch(struct thread *from, struct thread *to) {
         TRACE_THREAD("SWITCH: Switching to thread %d (no source thread)", to->tid);
 
         reset_thread_priority(to);
+
+        to->proc->current_thread = to;
+
+        sync_sys_to_proc(to);
 
         if((to_ctx->sr & 0x2000) == 0) leave_kernel();
         change_context(to_ctx);
@@ -782,7 +791,6 @@ static void prepare_thread_switch(struct thread_switch_context *ctx) {
     }
 }
 
-/* Add this new function to execute thread switch in minimal critical section */
 static void execute_thread_switch(struct thread_switch_context *ctx) {
     unsigned long now;
     // Check if another switch is in progress
@@ -839,49 +847,50 @@ static void execute_thread_switch(struct thread_switch_context *ctx) {
     
     // Handle context switch based on thread state
     if ((ctx->from->wait_type & WAIT_SLEEP) || (ctx->from->wait_type & WAIT_JOIN) || (ctx->from->state & THREAD_STATE_EXITED)) {
+        
+        /* We should come here because of join and sleep functions, may be others functions bring here? */
+        sync_sys_from_proc(ctx->from);
+
         TRACE_THREAD("SWITCH: Thread %d is sleeping, joining or waiting on semaphore, skipping switch", ctx->from->tid);
-        // Sleeping thread path - direct context switch
+
         atomic_thread_state_change(ctx->to, THREAD_STATE_RUNNING);
+
         ctx->from->proc->current_thread = ctx->to;
+
         reset_thread_priority(ctx->to);
+        
         reset_thread_switch_state();
 
-        TRACE_THREAD("SWITCH: Switched to context for thread %d, sr = %x, ssp = %lx, usp = %lx, pc = %lx", ctx->to->tid, ctx->to_ctx->sr, ctx->to_ctx->ssp, ctx->to_ctx->usp, ctx->to_ctx->pc);
+        TRACE_THREAD("SWITCH: Switched to new context for thread %d, sr = %x, ssp = %lx, usp = %lx, pc = %lx", ctx->to->tid, ctx->to_ctx->sr, ctx->to_ctx->ssp, ctx->to_ctx->usp, ctx->to_ctx->pc);
+
+        sync_sys_to_proc(ctx->to);
 
         if((ctx->to_ctx->sr & 0x2000) == 0) leave_kernel();
+
         change_context(ctx->to_ctx);
         
         TRACE_THREAD("SWITCH ERROR: Returned from change_context!");
     } else {
+
         if (ctx->from->wait_type == WAIT_NONE) {
             atomic_thread_state_change(ctx->from, THREAD_STATE_READY);
         }
+
         CONTEXT *from_ctx = get_thread_context(ctx->from);
-        
-        // Validate stack alignment before save (M68K requires even addresses)
-        if ((from_ctx->ssp & 1) || (from_ctx->usp & 1)) {
-            TRACE_THREAD("SWITCH ERROR: Invalid stack alignment - SSP=%lx, USP=%lx", 
-                        from_ctx->ssp, from_ctx->usp);
-            ctx->to = NULL;
-            return;
-        }
-        TRACE_THREAD("PRE-SAVE: Thread %d context - SSP=%lx, USP=%lx, PC=%lx", 
+
+        TRACE_THREAD("PRE-SAVE -> CONTEXT: Thread %d context - SSP=%lx, USP=%lx, PC=%lx", 
                     ctx->from->tid, from_ctx->ssp, from_ctx->usp, from_ctx->pc);
-        
+
         if (save_context(from_ctx) == 0) {
+            
             from_ctx->regs[0] = 1;
 
+            sync_sys_from_proc(ctx->from);
+
             TRACE_THREAD("SWITCH: FIRST TIME - Saved context successfully for thread %d, ssp = %lx, usp = %lx, pc = %lx, sr = %x, to = %d", ctx->from->tid, from_ctx->ssp, from_ctx->usp, from_ctx->pc, from_ctx->sr, ctx->to->tid);
-            
-            // // Only change state if not blocked on mutex/semaphore
-            // if(ctx->to->state & THREAD_STATE_EXITED) {
-            //     TRACE_THREAD("SWITCH: Thread %d is exiting, skipping switch", ctx->to->tid);
-            //     atomic_thread_state_change(ctx->from, THREAD_STATE_RUNNING);
-            //     ctx->to = NULL;
-            //     return;
-            // }
 
             atomic_thread_state_change(ctx->to, THREAD_STATE_RUNNING);
+
             ctx->from->proc->current_thread = ctx->to;
 
             reset_thread_priority(ctx->to);
@@ -890,26 +899,19 @@ static void execute_thread_switch(struct thread_switch_context *ctx) {
 
             TRACE_THREAD("SWITCH: Switched to context for thread %d, ssp = %lx, usp = %lx, pc = %lx, sr = %x", ctx->to->tid, ctx->to_ctx->ssp, ctx->to_ctx->usp, ctx->to_ctx->pc, ctx->to_ctx->sr);
             
-            if((ctx->to_ctx->sr & 0x2000) == 0) {
-                TRACE_THREAD("SWITCH: Leaving kernel mode for thread %d", ctx->to->tid);
-                leave_kernel();
-            }
+            sync_sys_to_proc(ctx->to);
+            
+            if((ctx->to_ctx->sr & 0x2000) == 0) leave_kernel();
+            
             change_context(ctx->to_ctx);
             
             TRACE_THREAD("SWITCH ERROR: Returned from change_context!");
-        } else {
-
-            TRACE_THREAD("SWITCH: SECOND TIME - Thread %d resumed from context switch at pc=%lx", ctx->from->tid, from_ctx->pc);
-            // If we failed to save context, we can't switch
-            atomic_thread_state_change(ctx->from, THREAD_STATE_RUNNING);
-            ctx->to = NULL;
-            
         }
-    }
 
-    TRACE_THREAD("SWITCH: Return path after being switched back");
-    // Return path after being switched back
-    reset_thread_switch_state();
+        TRACE_THREAD("SWICTH: Changed context after saved context for thread %d, IN_DOS %x, IN_KERNEL %x",CURTHREAD->tid ,CURTHREAD->proc->in_dos, in_kernel);
+
+    }
+    return;
 }
 
 /* Add these functions to optimize proc_thread_schedule */
@@ -1032,7 +1034,6 @@ static void execute_scheduling_decision(struct proc *p, struct scheduling_decisi
     
     // Update next thread state
     atomic_thread_state_change(decision->next_thread, THREAD_STATE_RUNNING);
-    p->current_thread = decision->next_thread;
 
     // Reschedule preemption timer if needed
     if (p->p_thread_timer.in_handler) {
@@ -1110,7 +1111,9 @@ static void thread_switch_timeout_handler(PROC *p, long arg) {
         // More aggressive recovery - try to restore a known good state
         if (p && p->current_thread && p->current_thread->magic == CTXT_MAGIC) {
             CONTEXT *ctx = get_thread_context(p->current_thread);
+
             TRACE_THREAD("TIMEOUT: Attempting to restore current thread %d",  p->current_thread->tid);
+            sync_sys_to_proc(p->current_thread);
             if((ctx->sr & 0x2000) == 0) leave_kernel();
             change_context(ctx);
 

@@ -151,7 +151,7 @@ int proc_thread_condvar_wait(struct condvar *cond, struct mutex *mutex) {
 
     // Verify thread owns the mutex
     if (mutex->owner != t) {
-        TRACE_THREAD("CONDVAR WAIT: Thread %d doesn't own mutex", t->tid);
+        TRACE_THREAD("CONDVAR WAIT: Thread %d doesn't own mutex %p, owned by thread pointer %d", t->tid, mutex, mutex->owner);
         return EINVAL;
     }
 

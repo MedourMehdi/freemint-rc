@@ -79,6 +79,8 @@ static void thread_signal_trampoline(int sig, void *arg)
 {
     struct thread *t = CURTHREAD;
     struct proc *p = curproc;
+
+    TRACE_THREAD("SIGNAL TRAMPOLINE - thread_signal_trampoline: thread %d signal %d", t ? t->tid : -1, sig);
     
     if (!t || !p || !p->p_sigacts || sig <= 0 || sig >= NSIG)
         return;
@@ -108,7 +110,9 @@ static void thread_signal_trampoline(int sig, void *arg)
         t->t_sig_in_progress = 0;
         return;
     }
-    
+
+    memcpy(&t->sig_ctx, &t->ctxt[SYSCALL], sizeof(struct context));
+
     /* Set up stack pointers for signal handler */
     unsigned long ssp = ((unsigned long)t->sig_stack + STKSIZE - 128) & ~3L;
     unsigned long usp = ((unsigned long)t->sig_stack + STKSIZE - 256) & ~3L;
@@ -117,24 +121,13 @@ static void thread_signal_trampoline(int sig, void *arg)
     t->sig_ctx.ssp = ssp;
     t->sig_ctx.usp = usp;
     t->sig_ctx.pc = (unsigned long)handler_execute;
-    t->sig_ctx.sr = 0x2000;  /* Supervisor mode */
-    
+    t->sig_ctx.sr = 0x0000;
+
+    *((long *)(t->sig_ctx.usp + 4)) = (long) handler_arg;
+
     /* Set up arguments in registers */
     t->sig_ctx.regs[0] = sig;  /* D0 = signal number */
     t->sig_ctx.regs[1] = (unsigned long)handler_arg;  /* D1 = handler argument */
-    
-    /* Create a proper exception frame for RTE */
-    unsigned short *frame_ptr = (unsigned short *)(ssp - 8);
-    frame_ptr[0] = 0x0000;  /* Format/Vector */
-    frame_ptr[1] = 0x2000;  /* SR (Supervisor mode) */
-    frame_ptr[2] = (unsigned short)((unsigned long)handler_execute >> 16);
-    frame_ptr[3] = (unsigned short)((unsigned long)handler_execute);
-    
-    memcpy(&t->ctxt[CURRENT].crp, &t->proc->ctxt[CURRENT].crp, sizeof(t->ctxt[CURRENT].crp));
-    memcpy(&t->ctxt[CURRENT].tc, &t->proc->ctxt[CURRENT].tc, sizeof(t->ctxt[CURRENT].tc));
-        
-    /* Update SSP to point to our exception frame */
-    t->sig_ctx.ssp = (unsigned long)frame_ptr;
     
     /* Let the scheduler handle the context switch */
     proc_thread_schedule();

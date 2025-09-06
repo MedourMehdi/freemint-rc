@@ -314,8 +314,12 @@ long proc_thread_sleep(long ms) {
     CONTEXT *ctx = get_thread_context(t);
 
     if (save_context(ctx) == 0) {
+
         ctx->regs[0] = 1;
+
         // First time through - this is the "going to sleep" path
+        // memcpy(&t->ctxt[SYSCALL], &t->proc->ctxt[SYSCALL], sizeof(CONTEXT));
+        TRACE_THREAD("SLEEP: SAVED SYSCALL CONTEXT: Thread %d context - SSP=%lx, USP=%lx, PC=%lx", t->tid, t->ctxt[SYSCALL].ssp, t->ctxt[SYSCALL].usp, t->ctxt[SYSCALL].pc);        
         TRACE_THREAD_SLEEP(t, ms, ticks, t->wakeup_time);
         
         atomic_thread_state_change(t, THREAD_STATE_BLOCKED);
@@ -359,6 +363,7 @@ long proc_thread_yield(void) {
     struct thread *t;
     
     if (!p || !p->current_thread){
+        TRACE_THREAD("YIELD: No current thread");
         yield();
         return 0;
     }

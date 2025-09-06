@@ -56,11 +56,12 @@ void *producer_thread(void *arg) {
         pthread_mutex_unlock(&data.mutex);
         
         // Sleep briefly
-        //msleep(100);
-	usleep(100000);
+        // msleep(1500);
+	    usleep(100000);
     }
     
     printf("Producer %d finished\n", producer_id);
+    pthread_exit(NULL);
     return NULL;
 }
 
@@ -102,12 +103,13 @@ void *consumer_thread(void *arg) {
         pthread_mutex_unlock(&data.mutex);
         
         // Sleep briefly
-        //msleep(150);
-	usleep(150000);
+        // msleep(1500);
+	    usleep(150000);
 
     }
     
     printf("Consumer %d finished (consumed %d items)\n", consumer_id, consumed);
+    pthread_exit(NULL);
     return NULL;
 }
 

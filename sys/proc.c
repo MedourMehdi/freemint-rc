@@ -46,6 +46,7 @@
 # include "random.h"
 # include "xbios.h"
 
+#include "proc_threads_debug.h"
 
 /*
  * We initialize proc_clock to a very large value so that we don't have
@@ -669,12 +670,17 @@ sleep(int _que, long cond)
 	/* p is our victim */
 	rm_q(READY_Q, p);
 	spl(sr);
+
+	if(curproc->current_thread) TRACE_THREAD("PROC_SLEEP WARNING: %d", p->pid);
+
 	/* Switch to main thread for multi-threaded processes */
-	if (curproc->current_thread && curproc->current_thread->tid != 0) {
-		_ctx = &(curproc->current_thread->ctxt[CURRENT]);
+	if (curproc->current_thread) {
+		TRACE_THREAD("SLEEP save_context THREAD ID %d", curproc->current_thread->tid);
+		_ctx = &(curproc->current_thread->ctxt[SYSCALL]);
 	} else {
 		_ctx = &(curproc->ctxt[CURRENT]);
 	}
+
 	if (save_context(_ctx))
 	{
 		/*
@@ -690,13 +696,17 @@ sleep(int _que, long cond)
 	 * save per-process variables here
 	 */
 	_ctx->regs[0] = 1;
+
 	curproc = p;
+
 	/* Switch to main thread for multi-threaded processes */
-	if (curproc->current_thread && curproc->current_thread->tid != 0) {
-		_ctx = &(curproc->current_thread->ctxt[CURRENT]);
+	if (curproc->current_thread) {
+		TRACE_THREAD("SLEEP change_context THREAD ID %d", curproc->current_thread->tid);
+		_ctx = &(curproc->current_thread->ctxt[SYSCALL]);
 	} else {
 		_ctx = &(curproc->ctxt[CURRENT]);
 	}
+
 	proc_clock = time_slice;			/* fresh time */
 
 	if ((_ctx->sr & 0x2000) == 0)	/* user mode? */

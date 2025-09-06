@@ -111,11 +111,13 @@ int thread_mutex_lock(struct mutex *mutex) {
             
         /* Apply priority ceiling if needed */
         handle_priority_ceiling(mutex, t, 1);
-        TRACE_THREAD("MUTEX LOCK: Thread %d acquired mutex %p", t->tid, mutex);
+        TRACE_THREAD("MUTEX LOCK: Thread %d acquired mutex %p, mutex owner pointer is now %p", t->tid, mutex, mutex->owner);
         spl(sr);
         return THREAD_SUCCESS;
     }
-    
+
+    TRACE_THREAD("MUTEX LOCK: Mutex %p locked count is %d", mutex, mutex->lock_count);
+
     /* Check for recursive locking */
     if (mutex->owner == t) {
         switch (mutex->type) {

@@ -46,6 +46,8 @@ void *thread1_func(void *arg) {
     printf("--> Thread 1: FINISHED\n");
     thread1_done = 1;
     
+    pthread_exit(NULL);
+
     return NULL;  // Must return a value
 }
 
@@ -63,6 +65,8 @@ void *thread2_func(void *arg) {
     
     thread2_done = 1;
     printf("--> Thread %ld: FINISHED\n", my_tid);
+
+    pthread_exit(NULL);
     
     return NULL;  // Must return a value
 }
@@ -90,10 +94,10 @@ int main(void) {
     
     printf("Main: threads created (tid1=%ld, tid2=%ld)\n", (long)thread1, (long)thread2);
 
-    pthread_tryjoin_np(thread1, NULL);
-    pthread_tryjoin_np(thread2, NULL);
-    // pthread_join(thread1, NULL);
-    // pthread_join(thread2, NULL);    
+    // pthread_tryjoin_np(thread1, NULL);
+    // pthread_tryjoin_np(thread2, NULL);
+    pthread_join(thread1, NULL);
+    pthread_join(thread2, NULL);    
 
     printf("Main: all threads finished, counter final = %d\n", counter);
     

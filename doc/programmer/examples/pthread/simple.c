@@ -22,16 +22,18 @@ void counter_thread(void *arg) {
     
     for (int i = 0; i < 10; i++) {
         counter++;
-        printf("Thread %d: counter = %d, mode = %s, i = %d\n", 
+        printf("Thread %d: counter = %d, mode = %s\n", 
                thread_num, counter, 
-               is_supervisor_mode() ? "SUPERVISOR" : "USER", i);
-        pthread_yield();
+               is_supervisor_mode() ? "SUPERVISOR" : "USER");
     }
+
+    printf("thread %d out of for loop\n", thread_num);
     
     if (thread_num == 1) {
         printf("thread 1 executed\n");
         thread_done = 1;
     }
+
     pthread_exit(NULL);
 }
 
@@ -39,7 +41,7 @@ int main(void) {
 
     pthread_t thread1, thread2;
     int result;
-    
+
     printf("Main: TEST THREADS\n");
     
     result = pthread_create(&thread1, NULL, (void *(*)(void *))counter_thread, (void*)1);
@@ -60,6 +62,7 @@ int main(void) {
 
     pthread_join(thread1, NULL);
     pthread_join(thread2, NULL);
+
     printf("Main: threads %s, final counter = %d\n", 
            thread_done ? "completed" : "timed out", counter);
     printf("Test completed\n");

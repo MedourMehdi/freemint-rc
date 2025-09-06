@@ -843,6 +843,8 @@ init (void)
 	rootproc->ctxt[SYSCALL].ssp = (long)(rootproc->stack + ISTKSIZE);
 	rootproc->ctxt[SYSCALL].term_vec = (long) rts;
 
+	rootproc->current_thread = NULL;
+	
 	*((long *)(rootproc->ctxt[CURRENT].usp + 4)) = 0;
 	*((long *)(rootproc->ctxt[SYSCALL].usp + 4)) = 0;
 
