@@ -21,6 +21,7 @@
 # include "signal.h"
 # include "util.h"
 
+# include "proc_threads.h"
 
 /*
  * send a signal to another process. If pid > 0, send the signal just to
@@ -150,6 +151,7 @@ long _cdecl
 sys_p_signal (short sig, long handler)
 {
 	PROC *p = get_curproc();
+	struct thread *t = CURTHREAD;
 	struct sigaction *sigact;
 	long ret;
 
@@ -168,6 +170,50 @@ sys_p_signal (short sig, long handler)
 		goto out;
 	}
 
+
+	/* Check if we're in a thread context and thread signals are enabled */
+	if (p->p_sigacts->thread_signals && t && t->tid != 0 && t->magic == CTXT_MAGIC) {
+		/* Handle as thread-specific signal */
+		void (*prev_handler)(int, void*) = t->sig_handlers[sig].handler;
+		
+		if (handler == SIG_DFL) {
+			/* Clear thread-specific handler, fall back to process handler */
+			TRACE(("Psignal: clearing thread-specific handler for sig %d", sig));
+			t->sig_handlers[sig].handler = NULL;
+			t->sig_handlers[sig].arg = NULL;
+			/* Discard pending signal for this thread */
+			t->t_sigpending &= ~(1L << sig);
+			/* Return previous handler, or SIG_DFL if there wasn't one */
+			ret = prev_handler ? (long)prev_handler : SIG_DFL;
+		} else if (handler == SIG_IGN) {
+			/* Set to ignore - clear thread handler and discard pending */
+			TRACE(("Psignal: setting SIG_IGN for thread %d sig %d", t->tid, sig));
+			ret = prev_handler ? (long)prev_handler : SIG_DFL;
+			t->sig_handlers[sig].handler = NULL;
+			t->sig_handlers[sig].arg = NULL;
+			/* Discard pending signals for this thread */
+			t->t_sigpending &= ~(1L << sig);
+			/* Also set at process level so behavior is consistent */
+			goto set_process_handler;
+		} else {
+			/* Set custom handler for this thread */
+			TRACE(("Psignal: setting custom handler %lx for thread %d sig %d", 
+			       handler, t->tid, sig));
+			ret = prev_handler ? (long)prev_handler : SIG_DFL;
+			t->sig_handlers[sig].handler = (void(*)(int, void*))handler;
+			t->sig_handlers[sig].arg = NULL;
+		}
+		
+		/* Unmask the signal for this thread (per documented side effect) */
+		t->t_sigmask &= ~(1L << sig);
+		
+		goto out;
+	}
+
+set_process_handler:
+	/* Handle as process-level signal (original behavior) */
+	/* This label allows SIG_IGN from threads to also set process-level handler */
+
 	sigact = & SIGACTION(p, sig);
 	TRACE (("Psignal() sigact = %p", sigact));
 
@@ -184,7 +230,16 @@ sys_p_signal (short sig, long handler)
 		/* discard pending signals */
 		p->sigpending &= ~(1L<<sig);
 	}
-
+		
+	/* Also discard from all threads if thread signals are enabled */
+	if (p->p_sigacts->thread_signals) {
+		struct thread *th;
+		for (th = p->threads; th != NULL; th = th->next) {
+			if (th->magic == CTXT_MAGIC) {
+				th->t_sigpending &= ~(1L << sig);
+			}
+		}
+	}
 	/* I dunno if this is right, but bash seems to expect it */
 	p->p_sigmask &= ~(1L<<sig);
 

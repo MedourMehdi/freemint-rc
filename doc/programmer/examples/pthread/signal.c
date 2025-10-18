@@ -4,9 +4,43 @@
 #include <signal.h>
 #include <pthread.h>
 
+#include <mint/mintbind.h>
+
+/* ============================================================================
+ * P_THREAD_SIGNAL OPERATIONS (sys_p_thread_signal)
+ * ============================================================================ */
+#define PTSIG_MODE              0   /* Enable/disable thread signals */
+#define PTSIG_KILL              1   /* Send signal to specific thread */
+#define PTSIG_GETMASK           2   /* Get thread signal mask */
+#define PTSIG_SETMASK           3   /* Set thread signal mask */
+#define PTSIG_BLOCK             4   /* Block signals */
+#define PTSIG_UNBLOCK           5   /* Unblock signals */
+#define PTSIG_WAIT              6   /* Wait for signal */
+#define PTSIG_HANDLER           7   /* Set signal handler */
+#define PTSIG_HANDLER_ARG       8   /* Set signal handler with argument */
+#define PTSIG_PENDING           9   /* Get pending signals */
+#define PTSIG_ALARM             10   /* Set alarm signal */
+#define PTSIG_ALARM_THREAD      11   /* Set alarm signal for specific thread */
+#define PTSIG_PAUSE             12   /* Pause with specified mask */
+#define PTSIG_BROADCAST         13   /* Broadcast signal to all threads */
+
 // Global variables
 volatile int signal_count = 0;
 pthread_mutex_t count_mutex;
+/* Define the PE_THREAD mode for Pexec */
+#define PE_THREAD       107
+
+#define P_PTHREAD 0x185
+
+/* ============================================================================
+ * PRIMARY SYSCALL CATEGORIES (sys_p_thread_syscall dispatcher)
+ * ============================================================================ */
+#define P_THREAD_CTRL       1   /* Thread control operations */
+#define P_THREAD_SYNC       2   /* Synchronization operations */
+#define P_THREAD_SIGNAL     3   /* Signal operations */
+static inline long proc_thread_signal(long op, long arg1, long arg2) {
+    return trap_1_wllll((short)P_PTHREAD, (long)P_THREAD_SIGNAL, (long)op, (long)arg1, (long)arg2);
+}
 
 // Signal handler for thread-specific signals
 void thread_signal_handler(int sig, void *arg) {
@@ -63,7 +97,8 @@ void *thread_func(void *arg) {
     }
     
     printf("Thread %d exiting\n", thread_num);
-    return NULL;
+    // return NULL;
+    pthread_exit(NULL);
 }
 
 int main() {

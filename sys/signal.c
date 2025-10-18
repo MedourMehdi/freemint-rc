@@ -206,7 +206,8 @@ post_sig (PROC *p, ushort sig)
 	/* Check for thread-specific signal handling */
 	if (p->p_sigacts && p->p_sigacts->thread_signals) {
 		/* Skip thread-specific handling for thread0 */
-		if (p->current_thread && p->current_thread->tid != 0) {
+		// if (p->current_thread && p->current_thread->tid != 0) {
+		if (p->current_thread) {
 			/* Try thread-aware signal delivery */
 			if (proc_thread_signal_aware_raise(p, sig) == 0) {
 				delivered = 1;
@@ -299,8 +300,9 @@ check_sigs (void)
 		return;
 		
 	/* Check for thread-specific signals if we have a current thread */
-	if (p->p_sigacts && p->p_sigacts->thread_signals && p->current_thread && 
-		p->current_thread->tid != 0) {
+	if (p->p_sigacts && p->p_sigacts->thread_signals && p->current_thread 
+		// &&  p->current_thread->tid != 0
+	) {
 		dispatch_thread_signals(p->current_thread);
 	}
 	

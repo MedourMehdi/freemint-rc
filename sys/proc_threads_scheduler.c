@@ -969,6 +969,8 @@ static int prepare_scheduling_decision(struct proc *p, struct scheduling_decisio
             TRACE_THREAD("SCHED: Continuing with current thread %d",  decision->current_thread->tid);
             decision->current_thread->last_scheduled = decision->decision_time;
             return 0; // No switch needed
+        } else if (p->num_threads > 1 && thread0 && thread0->wait_type & WAIT_JOIN) {
+            decision->next_thread = get_idle_thread(p);
         } else {
             TRACE_THREAD("SCHED: No threads available");
             return 0;            
