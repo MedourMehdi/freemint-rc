@@ -149,6 +149,13 @@ long _cdecl sys_p_thread_ctrl(long func, long arg1, long arg2) {
         case THREAD_CTRL_GETID:
             return sys_p_thread_getid();
 
+        case THREAD_CTRL_GET_ERRNO_PTR:
+            return (long)CURTHREAD->errno_ptr;  // May be NULL
+
+        case THREAD_CTRL_SET_ERRNO_PTR:
+            CURTHREAD->errno_ptr = (int *)arg1;
+            return 0;
+
         case THREAD_CTRL_SETNAME: {
             short tid = (short)arg1;
             char *user_name = (char *)arg2;

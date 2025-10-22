@@ -136,7 +136,8 @@ struct thread {
     struct {
         void (*handler)(int, void*);
         void *arg;
-    } sig_handlers[32];	
+    } sig_handlers[32];
+	int * errno_ptr;                   /* Pointer to thread-specific errno */
 };
 
 /**
