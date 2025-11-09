@@ -35,7 +35,7 @@ static void thread_timeout_sighandler(PROC *p, long arg);
 static void thread_signal_alarm_handler(PROC *p, long arg);
 
 /* Trampoline function to call thread signal handlers with proper context management */
-static void thread_signal_trampoline(int sig, void *arg);
+static void thread_signal_trampoline(int sig, struct thread *t);
 static void handler_execute(int sig, void *arg);
 
 /* Signal Threads implementation */
@@ -72,12 +72,8 @@ static void thread_timeout_sighandler(PROC *p, long arg)
 /*
  * Signal trampoline function to call thread signal handlers
  */
-/*
- * Signal trampoline function to call thread signal handlers
- */
-static void thread_signal_trampoline(int sig, void *arg)
+static void thread_signal_trampoline(int sig, struct thread *t)
 {
-    struct thread *t = CURTHREAD;
     struct proc *p = curproc;
 
     TRACE_THREAD("SIGNAL TRAMPOLINE - thread_signal_trampoline: thread %d signal %d", t ? t->tid : -1, sig);
@@ -94,9 +90,6 @@ static void thread_signal_trampoline(int sig, void *arg)
     if (!handler)
         return;
 
-    /* Mark that we're processing a signal */
-    t->t_sig_in_progress = sig;
-
     /* Save the old signal mask */
     t->old_sigmask = THREAD_SIGMASK(t);
     
@@ -107,19 +100,17 @@ static void thread_signal_trampoline(int sig, void *arg)
     t->sig_stack = kmalloc(STKSIZE);
     if (!t->sig_stack) {
         TRACE_THREAD("Failed to allocate signal stack for thread %d", t->tid);
-        t->t_sig_in_progress = 0;
         return;
     }
 
-    memcpy(&t->sig_ctx, &t->ctxt[SYSCALL], sizeof(struct context));
+    /* Mark that we're processing a signal */
+    t->t_sig_in_progress = sig;
 
-    /* Set up stack pointers for signal handler */
-    unsigned long ssp = ((unsigned long)t->sig_stack + STKSIZE - 128) & ~3L;
-    unsigned long usp = ((unsigned long)t->sig_stack + STKSIZE - 256) & ~3L;
+    memcpy(&t->sig_ctx, &t->ctxt[SYSCALL], sizeof(struct context));
     
     /* Set up signal handler context */
-    t->sig_ctx.ssp = ssp;
-    t->sig_ctx.usp = usp;
+    t->sig_ctx.ssp = ((unsigned long)t->sig_stack + STKSIZE - 128) & ~3L;
+    t->sig_ctx.usp = ((unsigned long)t->sig_stack + STKSIZE - 256) & ~3L;
     t->sig_ctx.pc = (unsigned long)handler_execute;
     t->sig_ctx.sr = 0x0000;
 
@@ -139,6 +130,8 @@ static void handler_execute(int sig, void *arg)
     struct proc *p = curproc;
     TIMEOUT *cleanup_signal_timeout = NULL;
     
+    TRACE_THREAD("HANDLER EXECUTE - handler_execute: thread %d signal %d", t ? t->tid : -1, sig);
+
     if (!t || !p || !p->p_sigacts || sig <= 0 || sig >= NSIG)
         return;
         
@@ -175,7 +168,7 @@ void handle_thread_signal(struct thread *t, int sig)
         
     /* If already handling a signal for this thread, exit */
     if (t->t_sig_in_progress) {
-        TRACE_THREAD("Signal %d ignored - thread %d already handling signal %d",
+        TRACE_THREAD("handle_thread_signal: Signal %d ignored - thread %d already handling signal %d",
                     sig, t->tid, t->t_sig_in_progress);
         return;
     }
@@ -183,7 +176,7 @@ void handle_thread_signal(struct thread *t, int sig)
     /* Check if there's a thread-specific handler */
     if (t->sig_handlers[sig].handler) {
         /* Execute handler in thread context */
-        thread_signal_trampoline(sig, t->sig_handlers[sig].arg);
+        thread_signal_trampoline(sig, t);
     } else {
         /* No handler registered yet, keep the signal pending for the thread */
         TRACE_THREAD("handle_thread_signal: no thread handler for signal %d, keeping it pending", sig);
@@ -350,26 +343,18 @@ int proc_thread_signal_aware_raise(struct proc *p, int sig)
  * Check for pending signals in a thread
  * Returns signal number if a signal is pending, 0 otherwise
  */
-/*
- * Check for pending signals in a thread
- * Returns signal number if a signal is pending, 0 otherwise
- */
 int check_thread_signals(struct thread *t)
 {
     int sig;
-    register unsigned short sr;
     
     if (!t || !t->proc)
         return 0;
-    
-    sr = splhigh();  // Protect access to thread signal state
         
     /* Check for pending signals that aren't masked */
     ulong pending = THREAD_SIGPENDING(t) & ~THREAD_SIGMASK(t);
     
     if (!pending){
         TRACE_THREAD("check_thread_signals: no pending signals for thread %d", t->tid);
-        spl(sr);
         return 0;
     }
         
@@ -382,12 +367,10 @@ int check_thread_signals(struct thread *t)
             /* Return the signal number */
             TRACE_THREAD("check_thread_signals: thread %d has pending signal %d", 
                         t->tid, sig);
-            spl(sr);
             return sig;
         }
     }
     TRACE_THREAD("check_thread_signals: no valid pending signals for thread %d", t->tid);
-    spl(sr);
     return 0;
 }
 

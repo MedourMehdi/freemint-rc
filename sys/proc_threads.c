@@ -260,6 +260,10 @@ static long create_thread(struct proc *p, void *(*func)(void*), void *arg, void*
     t->cancel_type = PTHREAD_CANCEL_DEFERRED;
     t->cancel_pending = 0;
     
+    t->errno_ptr = NULL;  // Initialize errno pointer to NULL
+    t->cleanup_stack = NULL; // No cleanup handlers initially
+    t->tsd_data = NULL; // Start with NULL TSD data
+    
         TRACE_THREAD("Thread %d stack: base=%p, top=%p, size=%zu", 
                  t->tid, t->stack, t->stack_top, stack_size);
     
@@ -353,6 +357,8 @@ static void init_main_thread_context(struct proc *p) {
     t0->stack = p->stack;
     t0->stack_top = (char*)p->stack + STKSIZE;
     t0->stack_magic = STACK_MAGIC;
+    t0->is_idle = 0;  // Not an idle thread
+    t0->stack_size = STKSIZE;
 
     // Initialize thread0 context from process context
     memcpy(&t0->ctxt[CURRENT], &p->ctxt[CURRENT], sizeof(CONTEXT));
@@ -387,7 +393,16 @@ static void init_main_thread_context(struct proc *p) {
     t0->detached = 0;  // Default is joinable
     t0->joined = 0;
 
-    /* Use process TSD data for thread0 */
+    // For thread0 (main thread - special semantics):
+    t0->cancel_state = PTHREAD_CANCEL_DISABLE;  // Protect main thread
+    t0->cancel_type = PTHREAD_CANCEL_DEFERRED;
+    t0->cancel_pending = 0;
+
+    t0->errno_ptr = NULL;  // Initialize errno pointer to NULL
+
+    t0->cleanup_stack = NULL; // No cleanup handlers
+
+    /* Thread0 uses process TSD data */
     t0->tsd_data = p->proc_tsd_data;
 
     p->threads = t0;
@@ -528,7 +543,7 @@ static void *idle_thread_func(void *arg) {
     p->pri = p->pri + 1;
 
     while (1) {
-        TRACE_THREAD("IDLE: Idle thread %d running", p->idle_thread->tid);
+        // TRACE_THREAD("IDLE: Idle thread %d running", p->idle_thread->tid);
         kernel_pthread_syscall(P_THREAD_SYNC, THREAD_SYNC_YIELD, 0, 0);
     }
 
@@ -563,6 +578,7 @@ static struct thread* create_idle_thread(struct proc *p) {
         kfree(idle);
         return NULL;
     }
+    idle->stack_size = STKSIZE;
     idle->stack_top = (char*)idle->stack + STKSIZE;
     idle->stack_magic = STACK_MAGIC;
     
@@ -605,6 +621,13 @@ static struct thread* create_idle_thread(struct proc *p) {
     idle->joiner = NULL;
     idle->detached = 1;
     idle->joined = 0;
+
+    idle->cancel_state = PTHREAD_CANCEL_DISABLE;  // Disable cancellation for idle thread
+    // For idle thread (system thread - NOT cancellable):
+    idle->cancel_type = PTHREAD_CANCEL_DEFERRED;  // Type doesn't matter when disabled
+    idle->cancel_pending = 0; // No pending cancellation    
+    idle->errno_ptr = NULL;  // Initialize errno pointer to NULL
+    idle->cleanup_stack = NULL; // No cleanup handlers
 
     // Initialize context
     init_thread_context(idle, idle_thread_func, (void *)p);

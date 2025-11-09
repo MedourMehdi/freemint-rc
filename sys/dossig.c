@@ -172,13 +172,13 @@ sys_p_signal (short sig, long handler)
 
 
 	/* Check if we're in a thread context and thread signals are enabled */
-	if (p->p_sigacts->thread_signals && t && t->tid != 0 && t->magic == CTXT_MAGIC) {
+	if (p->p_sigacts->thread_signals && t && t->tid > 0 && t->magic == CTXT_MAGIC) {
 		/* Handle as thread-specific signal */
 		void (*prev_handler)(int, void*) = t->sig_handlers[sig].handler;
 		
 		if (handler == SIG_DFL) {
 			/* Clear thread-specific handler, fall back to process handler */
-			TRACE(("Psignal: clearing thread-specific handler for sig %d", sig));
+			TRACE_THREAD("Psignal: clearing thread-specific handler for thread %d sig %d", t->tid, sig);
 			t->sig_handlers[sig].handler = NULL;
 			t->sig_handlers[sig].arg = NULL;
 			/* Discard pending signal for this thread */
@@ -187,7 +187,7 @@ sys_p_signal (short sig, long handler)
 			ret = prev_handler ? (long)prev_handler : SIG_DFL;
 		} else if (handler == SIG_IGN) {
 			/* Set to ignore - clear thread handler and discard pending */
-			TRACE(("Psignal: setting SIG_IGN for thread %d sig %d", t->tid, sig));
+			TRACE_THREAD("Psignal: setting SIG_IGN for thread %d sig %d", t->tid, sig);
 			ret = prev_handler ? (long)prev_handler : SIG_DFL;
 			t->sig_handlers[sig].handler = NULL;
 			t->sig_handlers[sig].arg = NULL;

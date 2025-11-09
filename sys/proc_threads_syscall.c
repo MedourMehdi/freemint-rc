@@ -424,9 +424,9 @@ long _cdecl sys_p_thread_signal(long func, long arg1, long arg2) {
 }
 
 long _cdecl sys_p_thread_sync(long operator, long arg1, long arg2) {
-    TRACE_THREAD("sys_p_thread_sync: operator=%d arg1=%d arg2=%d", operator, arg1, arg2);
-    TRACE_THREAD("sys_p_thread_sync: PROC ID %d, THREAD ID %d", curproc ? curproc->pid : -1, CURTHREAD ? CURTHREAD->tid : -1);
-    TRACE_THREAD("sys_p_thread_sync: PROC SYSCALL SR %x, PC %lx, SSP %lx, USP %lx", curproc->ctxt[SYSCALL].sr, curproc->ctxt[SYSCALL].pc, curproc->ctxt[SYSCALL].ssp, curproc->ctxt[SYSCALL].usp);
+    // TRACE_THREAD("sys_p_thread_sync: operator=%d arg1=%d arg2=%d", operator, arg1, arg2);
+    // TRACE_THREAD("sys_p_thread_sync: PROC ID %d, THREAD ID %d", curproc ? curproc->pid : -1, CURTHREAD ? CURTHREAD->tid : -1);
+    // TRACE_THREAD("sys_p_thread_sync: PROC SYSCALL SR %x, PC %lx, SSP %lx, USP %lx", curproc->ctxt[SYSCALL].sr, curproc->ctxt[SYSCALL].pc, curproc->ctxt[SYSCALL].ssp, curproc->ctxt[SYSCALL].usp);
     switch (operator) {
         case THREAD_SYNC_SEM_WAIT:
             TRACE_THREAD("THREAD_SYNC_SEM_WAIT");

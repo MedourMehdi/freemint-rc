@@ -83,8 +83,11 @@ static void execute_scheduling_decision(struct proc *p, struct scheduling_decisi
 static inline void sync_sys_from_proc(struct thread *t)
 {
     if (!t || !t->proc) return;
-    TRACE_THREAD("SYNC PROC: Mirroring process context for thread %d", t->tid);
-    memcpy(&t->ctxt[SYSCALL], &t->proc->ctxt[SYSCALL], sizeof(CONTEXT));
+    /* Only sync if this thread was actually using the process SYSCALL context */
+    // if (t->proc->current_thread == t) {
+        TRACE_THREAD("SYNC PROC: Saving process context to thread %d", t->tid);
+        memcpy(get_thread_context(t), &t->proc->ctxt[SYSCALL], sizeof(CONTEXT));
+    // }
 }
 
 static inline void sync_sys_to_proc(struct thread *t)
@@ -92,7 +95,7 @@ static inline void sync_sys_to_proc(struct thread *t)
     if (!t || !t->proc) return;
     // if (t->proc->in_dos == 0) t->proc->in_dos = 1;
     TRACE_THREAD("SYNC SYS: Mirroring syscall context for thread %d", t->tid);
-    memcpy(&t->proc->ctxt[SYSCALL], &t->ctxt[SYSCALL], sizeof(CONTEXT));
+    memcpy(&t->proc->ctxt[SYSCALL], get_thread_context(t), sizeof(CONTEXT));
 }
 
 static inline void sync_sys_switch_pair(struct thread *from, struct thread *to)
@@ -606,7 +609,6 @@ void proc_thread_exit(void *retval, void *arg) {
     if (next_thread) sync_sys_to_proc(next_thread);
     p->current_thread = next_thread;
     spl(sr);
-    TRACE_THREAD("SWICTH: IN_DOS %x, IN_KERNEL %x", CURTHREAD->proc->in_dos, in_kernel);
     thread_switch(NULL, next_thread);
     
     // Should NEVER reach here - if we do, it's a critical error
@@ -714,13 +716,13 @@ void thread_switch(struct thread *from, struct thread *to) {
     // Special case: if from is NULL, just switch to the destination thread
     if (!from) {
         CONTEXT *to_ctx = get_thread_context(to);
-        to->last_scheduled = get_system_ticks();
         
         TRACE_THREAD("SWITCH: Switching to thread %d (no source thread)", to->tid);
 
         reset_thread_priority(to);
 
         to->proc->current_thread = to;
+        to->last_scheduled = get_system_ticks();
 
         sync_sys_to_proc(to);
 
@@ -814,7 +816,13 @@ static void execute_thread_switch(struct thread_switch_context *ctx) {
     // Update CPU time for outgoing thread
     now = get_system_ticks();
 
-    if (ctx->from->last_scheduled == 0) {
+    TRACE_THREAD("SWITCH: Thread %d scheduled at %lu (was %lu)", ctx->to->tid, now, ctx->to->last_scheduled);
+    if ( (ctx->from->priority_boost && (now - ctx->from->last_scheduled) > ctx->from->proc->thread_min_timeslice) 
+        && (ctx->from->wait_type == WAIT_NONE) ) {
+        reset_thread_priority(ctx->from);
+    }
+
+    if (!ctx->from->last_scheduled) {
         /*
          * First time this thread is switched out - it was never properly scheduled.
          * This happens for initial threads. Set last_scheduled to now to prevent
@@ -822,18 +830,6 @@ static void execute_thread_switch(struct thread_switch_context *ctx) {
          */
         ctx->from->last_scheduled = now;
         TRACE_THREAD("SWITCH: Initializing last_scheduled for thread %d", ctx->from->tid);
-    }
-
-    // Set new schedule time for incoming thread
-    ctx->to->last_scheduled = now;
-    TRACE_THREAD("SWITCH: Thread %d scheduled at %lu (was %lu)", ctx->to->tid, now, ctx->to->last_scheduled);
-    if (
-        (ctx->from->priority_boost 
-        && get_system_ticks() - ctx->from->last_scheduled > ctx->from->proc->thread_min_timeslice) 
-        && (ctx->from->wait_type == WAIT_NONE)
-    ) 
-    {
-        reset_thread_priority(ctx->from);
     }
 
     /* Check for pending signals in the thread we're switching to */
@@ -855,13 +851,14 @@ static void execute_thread_switch(struct thread_switch_context *ctx) {
 
         atomic_thread_state_change(ctx->to, THREAD_STATE_RUNNING);
 
-        ctx->from->proc->current_thread = ctx->to;
-
         reset_thread_priority(ctx->to);
         
         reset_thread_switch_state();
 
         TRACE_THREAD("SWITCH: Switched to new context for thread %d, sr = %x, ssp = %lx, usp = %lx, pc = %lx", ctx->to->tid, ctx->to_ctx->sr, ctx->to_ctx->ssp, ctx->to_ctx->usp, ctx->to_ctx->pc);
+
+        ctx->from->proc->current_thread = ctx->to;
+        if(ctx->to->tid > 0) ctx->to->last_scheduled = get_system_ticks();
 
         sync_sys_to_proc(ctx->to);
 
@@ -891,14 +888,15 @@ static void execute_thread_switch(struct thread_switch_context *ctx) {
 
             atomic_thread_state_change(ctx->to, THREAD_STATE_RUNNING);
 
-            ctx->from->proc->current_thread = ctx->to;
-
             reset_thread_priority(ctx->to);
 
             reset_thread_switch_state();
 
             TRACE_THREAD("SWITCH: Switched to context for thread %d, ssp = %lx, usp = %lx, pc = %lx, sr = %x", ctx->to->tid, ctx->to_ctx->ssp, ctx->to_ctx->usp, ctx->to_ctx->pc, ctx->to_ctx->sr);
             
+            ctx->from->proc->current_thread = ctx->to;
+            ctx->to->last_scheduled = get_system_ticks();
+
             sync_sys_to_proc(ctx->to);
             
             if((ctx->to_ctx->sr & 0x2000) == 0) leave_kernel();
@@ -920,7 +918,7 @@ static int prepare_scheduling_decision(struct proc *p, struct scheduling_decisio
     decision->decision_time = get_system_ticks();
     
     if (!decision->current_thread || 
-        decision->current_thread->last_scheduled + time_slice < decision->decision_time) {
+        (decision->current_thread->last_scheduled + time_slice) < decision->decision_time) {
         // Check and wake any sleeping threads
         check_and_wake_sleeping_threads(p);
     }
@@ -932,6 +930,7 @@ static int prepare_scheduling_decision(struct proc *p, struct scheduling_decisio
                      decision->current_thread->tid,
                      (decision->current_thread->wait_type & WAIT_MUTEX) ? "MUTEX" :
                      (decision->current_thread->wait_type & WAIT_CONDVAR) ? "CONDVAR" :
+                     (decision->current_thread->wait_type & WAIT_SIGNAL) ? "SIGNAL" :
                      (decision->current_thread->wait_type & WAIT_JOIN) ? "JOIN" : "UNKNOWN");
     }
 
@@ -967,7 +966,7 @@ static int prepare_scheduling_decision(struct proc *p, struct scheduling_decisio
             TRACE_THREAD("SCHED: Falling back to thread0");
         } else if (decision->current_thread && !(decision->current_thread->state & THREAD_STATE_BLOCKED) && !decision->current_thread->is_idle) {
             TRACE_THREAD("SCHED: Continuing with current thread %d",  decision->current_thread->tid);
-            decision->current_thread->last_scheduled = decision->decision_time;
+            // decision->current_thread->last_scheduled = decision->decision_time;
             return 0; // No switch needed
         } else if (p->num_threads > 1 && thread0 && thread0->wait_type & WAIT_JOIN) {
             decision->next_thread = get_idle_thread(p);
@@ -1116,6 +1115,7 @@ static void thread_switch_timeout_handler(PROC *p, long arg) {
 
             TRACE_THREAD("TIMEOUT: Attempting to restore current thread %d",  p->current_thread->tid);
             sync_sys_to_proc(p->current_thread);
+            p->current_thread->last_scheduled = get_system_ticks();            
             if((ctx->sr & 0x2000) == 0) leave_kernel();
             change_context(ctx);
 

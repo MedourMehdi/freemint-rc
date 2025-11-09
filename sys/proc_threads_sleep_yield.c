@@ -373,7 +373,7 @@ long proc_thread_yield(void) {
         return 0;
     }
     if(p->current_thread->is_idle) {
-        TRACE_THREAD("YIELD: Idle thread %d yielded, rescheduling", p->current_thread->tid);
+        // TRACE_THREAD("YIELD: Idle thread %d yielded, rescheduling", p->current_thread->tid);
         yield();
         return 0;
     }
@@ -381,11 +381,11 @@ long proc_thread_yield(void) {
     t = p->current_thread;
     
     // CRITICAL FIX: Check if yield is beneficial
-    // unsigned long now = get_system_ticks();
-    // unsigned long elapsed = now - t->last_scheduled;
+    unsigned long now = get_system_ticks();
+    unsigned long elapsed = now - t->last_scheduled;
     
-    // TRACE_THREAD("YIELD: Thread %d - now=%lu, last_scheduled=%lu, elapsed=%lu", 
-    //             t->tid, now, t->last_scheduled, elapsed);
+    TRACE_THREAD("YIELD: Thread %d - now=%lu, last_scheduled=%lu, elapsed=%lu", 
+                t->tid, now, t->last_scheduled, elapsed);
     
     // Don't yield if no other threads at same/higher priority
     struct thread *next = get_highest_priority_thread(p);
@@ -395,18 +395,17 @@ long proc_thread_yield(void) {
     }
     
     // Prevent excessive yielding (anti-livelock protection)
-    // if (elapsed < 2) {
-    //     TRACE_THREAD("YIELD: Thread %d yielding too frequently (%lu ticks), ignoring", 
-    //                 t->tid, elapsed);
-    //     return 0;
-    // }
+    if (elapsed < 2) {
+        TRACE_THREAD("YIELD: Thread %d yielding too frequently (%lu ticks), ignoring", 
+                    t->tid, elapsed);
+        return 0;
+    }
     
     // TRACE_THREAD("YIELD: Thread %d yielding after %lu ticks to thread %d", 
     //             t->tid, elapsed, next->tid);
     
     // For SCHED_FIFO and SCHED_RR, move to end of same-priority list
     if (t->policy == SCHED_FIFO || t->policy == SCHED_RR) {
-        register unsigned short sr = splhigh();
         
         // Only if we're in RUNNING state
         if (t->state == THREAD_STATE_RUNNING) {
@@ -417,12 +416,10 @@ long proc_thread_yield(void) {
             add_to_ready_queue(t);
             
             // Force a reschedule
-            spl(sr);
             proc_thread_schedule();
             return 0;
         }
         
-        spl(sr);
     } else {
         // For SCHED_OTHER, just call schedule
         proc_thread_schedule();
