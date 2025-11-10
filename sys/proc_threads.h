@@ -94,6 +94,12 @@
 #define PTSIG_PAUSE             12   /* Pause with specified mask */
 #define PTSIG_BROADCAST         13   /* Broadcast signal to all threads */
 
+#define PTSIG_WAITINFO          14   /* sigwaitinfo() */
+#define PTSIG_TIMEDWAIT         15   /* sigtimedwait() */
+#define PTSIG_QUEUE             16   /* sigqueue() */
+
+#define PTSIG_EXT_HANDLER       17   /* Set extended signal handler with siginfo */
+
 /* ============================================================================
  * PTHREAD COMPATIBILITY CONSTANTS
  * ============================================================================ */

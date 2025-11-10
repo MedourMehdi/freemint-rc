@@ -31,9 +31,23 @@
 
 # include "arch/context.h"
 
+# ifndef _mint_signal_h
+# include "mint/signal.h"
+# endif
 
 # define LOGIN_NAME_MAX	32
 # define MAXLOGNAME	LOGIN_NAME_MAX
+
+/* Maximum number of queued signals per process */
+#ifndef SIGQUEUE_MAX
+#define SIGQUEUE_MAX    32
+#endif
+/* Signal queue entry structure for queued signals */
+struct sigqueue_entry {
+	struct sigqueue_entry *next;    /* Next entry in queue */
+	siginfo_t info;                 /* Signal information */
+	short queued;                   /* 1 if from sigqueue, 0 if from kill */
+};
 
 /* Threads stuff */
 
@@ -129,9 +143,10 @@ struct thread {
     unsigned long t_sigpending;     /* Signals pending for this thread */
     unsigned long t_sigmask;        /* Thread-specific signal mask */
     short t_sig_in_progress;        /* Signal currently being processed */
-    CONTEXT sig_ctx;           /* Signal handler context */
-    void *sig_stack;           /* Signal handler stack */
-    ulong old_sigmask;         /* Saved signal mask during handler execution */	
+    CONTEXT sig_ctx;           		/* Signal handler context */
+	CONTEXT saved_ctx;      		/* Saved context before signal */
+    void *sig_stack;           		/* Signal handler stack */
+    ulong old_sigmask;         		/* Saved signal mask during handler execution */	
     /* Thread-specific signal handlers */
     struct {
         void (*handler)(int, void*);
@@ -450,6 +465,11 @@ struct proc
     int next_key;                /* Next available key index */
 	void **proc_tsd_data;         /* Process-wide thread-specific data */
 /* End of Threads stuff */
+
+	/* Signal queue for real-time signals */
+	struct sigqueue_entry *sigqueue_head;
+	struct sigqueue_entry *sigqueue_tail;
+	int sigqueue_count;
 
 };
 

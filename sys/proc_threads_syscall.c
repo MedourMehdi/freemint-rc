@@ -25,6 +25,8 @@
 #include "proc_threads_atomic.h"
 #include "proc_threads_queue.h"
 
+#include "dossig.h"
+
 #ifndef __SIZE_T
 #define __SIZE_T
 typedef unsigned long size_t;
@@ -40,6 +42,20 @@ typedef unsigned long size_t;
 #define copyin(src, dst, len) \
     (memcpy((void*)(dst), (const void*)(src), (size_t)(len)), 0)
 #endif
+
+/* Parameter structures for RT signal calls */
+struct sigtimedwait_params {
+	const sigset_t *set;
+	siginfo_t *info;
+	const struct timespec *timeout;
+};
+
+struct sigqueue_params {
+	long pid;
+	long sig;
+    int reserved; /* Padding for alignment */
+	union sigval value;
+};
 
 long _cdecl sys_p_thread_ctrl(long func, long arg1, long arg2) {
     // TRACE_THREAD("CTRL: sys_p_thread_ctrl called with func=%ld arg1=%ld arg2=%ld", func, arg1, arg2);
@@ -248,7 +264,6 @@ long _cdecl sys_p_thread_ctrl(long func, long arg1, long arg2) {
             struct thread *target = NULL;
 
             // Find target thread
-            register unsigned short sr = splhigh();
             struct thread *t = NULL;
             for (t = p->threads; t != NULL; t = t->next) {
                 if (t->tid == target_tid && t->magic == CTXT_MAGIC && 
@@ -259,14 +274,12 @@ long _cdecl sys_p_thread_ctrl(long func, long arg1, long arg2) {
             }
 
             if (!target) {
-                spl(sr);
                 TRACE_THREAD("SWITCH_TO_THREAD: Thread %d not found", target_tid);
                 return ESRCH;
             }
 
             // Validate thread state
             if (target->state != THREAD_STATE_READY || target == current) {
-                spl(sr);
                 TRACE_THREAD("SWITCH_TO_THREAD: Thread %d not ready or is current", target_tid);
                 return EAGAIN;
             }
@@ -289,7 +302,6 @@ long _cdecl sys_p_thread_ctrl(long func, long arg1, long arg2) {
                         current->tid, target->tid);
             thread_switch(current, target);
             
-            spl(sr);
             return 0;
         }
         
@@ -380,6 +392,56 @@ long _cdecl sys_p_thread_signal(long func, long arg1, long arg2) {
 
         case PTSIG_BROADCAST:
             return proc_thread_signal_broadcast(arg1);
+
+        case PTSIG_WAITINFO:
+            /* sigwaitinfo(const sigset_t *set, siginfo_t *info) 
+             * arg1 = set, arg2 = info
+             */
+            TRACE_THREAD("PTSIG_WAITINFO: set=%p, info=%p", (void*)arg1, (void*)arg2);
+            return sys_p_sigwaitinfo((const sigset_t *)arg1, (siginfo_t *)arg2);
+            
+        case PTSIG_TIMEDWAIT:
+            /* sigtimedwait - parameters passed via structure
+             * arg1 = pointer to struct sigtimedwait_params
+             */
+            {
+                struct sigtimedwait_params params;
+                
+                if (copyin((void*)arg1, &params, sizeof(params))) {
+                    TRACE_THREAD("PTSIG_TIMEDWAIT: copyin failed");
+                    return EFAULT;
+                }
+                
+                TRACE_THREAD("PTSIG_TIMEDWAIT: set=%p, info=%p, timeout=%p",
+                            params.set, params.info, params.timeout);
+                
+                return sys_p_sigtimedwait(params.set, params.info, params.timeout);
+            }
+            
+        case PTSIG_QUEUE:
+            /* sigqueue - parameters passed via structure
+             * arg1 = pointer to struct sigqueue_params
+             */
+            {
+                struct sigqueue_params params;
+                
+                TRACE_THREAD("PTSIG_QUEUE: arg1=%p (address of params struct)", (void*)arg1);
+                
+                if (copyin((void*)arg1, &params, sizeof(params))) {
+                    TRACE_THREAD("PTSIG_QUEUE: copyin failed");
+                    return EFAULT;
+                }
+                
+                TRACE_THREAD("PTSIG_QUEUE: after copyin - pid=%ld, sig=%ld, value=%ld/%p",
+                            params.pid, params.sig, 
+                            params.value.sival_int, params.value.sival_ptr);
+                
+                return sys_p_sigqueue(params.pid, params.sig, params.value);
+            }
+
+        case PTSIG_EXT_HANDLER:
+            TRACE_THREAD("PTSIG_EXT_HANDLER: sig=%ld, handler=%lx", arg1, arg2);
+            return sys_p_sigaction_ext((short)arg1, (void (*)(int, siginfo_t *, void *))arg2);
 
         default:
             if (func > 0 && func < NSIG) {

@@ -232,6 +232,9 @@ init_proc(void)
     rootproc->p_thread_timer.timeout = NULL;
     rootproc->p_thread_timer.in_handler = 0;
 	rootproc->idle_thread = NULL;
+
+	rootproc->sigqueue_tail = NULL;
+	rootproc->sigqueue_head = NULL;
 }
 
 /* remaining_proc_time():

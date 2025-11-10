@@ -55,6 +55,7 @@
 # include "util.h"
 # include "xbios.h"
 
+# include "dossig.h"
 
 /*
  * terminate a process, with return code "code".
@@ -122,8 +123,12 @@ terminate(struct proc *pcurproc, short code, short que)
 			dlockproc[i] = NULL;
 	}
 
+	/* Clean up all threads associated with this process */
 	proc_thread_cleanup_process(pcurproc);
-	
+
+	/* Clean up signal queue */
+	cleanup_signal_queue(pcurproc);
+
 	free_ext (pcurproc);
 
 	free_fd (pcurproc);
