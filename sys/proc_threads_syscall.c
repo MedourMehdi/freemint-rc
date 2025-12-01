@@ -53,7 +53,6 @@ struct sigtimedwait_params {
 struct sigqueue_params {
 	long pid;
 	long sig;
-    int reserved; /* Padding for alignment */
 	union sigval value;
 };
 
@@ -134,7 +133,7 @@ long _cdecl sys_p_thread_ctrl(long func, long arg1, long arg2) {
         }
         
         case THREAD_CTRL_CANCEL: {
-            struct thread *target = get_thread_by_id(curproc, (short)arg2);
+            struct thread *target = proc_thread_find(curproc, (short)arg2);
             if (!target) return ESRCH;
             
             register unsigned short sr = splhigh();
@@ -175,7 +174,7 @@ long _cdecl sys_p_thread_ctrl(long func, long arg1, long arg2) {
         case THREAD_CTRL_SETNAME: {
             short tid = (short)arg1;
             char *user_name = (char *)arg2;
-            struct thread *target = get_thread_by_id(curproc, tid);
+            struct thread *target = proc_thread_find(curproc, tid);
             if (!target) return ESRCH;
 
             char kname[16];
@@ -189,7 +188,7 @@ long _cdecl sys_p_thread_ctrl(long func, long arg1, long arg2) {
         case THREAD_CTRL_GETNAME: {
             short tid = (short)arg1;
             char *user_buf = (char *)arg2;
-            struct thread *target = get_thread_by_id(curproc, tid);
+            struct thread *target = proc_thread_find(curproc, tid);
             if (!target) return ESRCH;
             
             if (copyout(target->name, user_buf, 16)) return EFAULT;
@@ -294,16 +293,17 @@ long _cdecl sys_p_thread_ctrl(long func, long arg1, long arg2) {
             }
             
             atomic_thread_state_change(target, THREAD_STATE_RUNNING);
-            p->current_thread = target;
-            target->last_scheduled = get_system_ticks();
+            // p->current_thread = target;  --- IGNORE --- Handled by thread_switch()
+            // target->last_scheduled = get_system_ticks(); --- IGNORE --- Handled in thread_switch()
 
             // Perform context switch
-            TRACE_THREAD("SWITCH_TO_THREAD: Switching %d -> %d", 
-                        current->tid, target->tid);
+            TRACE_THREAD("SWITCH_TO_THREAD: Switching %d -> %d", current->tid, target->tid);
             thread_switch(current, target);
             
             return 0;
         }
+        case THREAD_CTRL_SIGRETURN:
+            return proc_thread_sigreturn();
         
         default:
             TRACE_THREAD("ERROR: sys_p_thread_ctrl called with invalid func %d", func);
@@ -321,6 +321,7 @@ long _cdecl sys_p_thread_signal(long func, long arg1, long arg2) {
         case PTSIG_KILL:
             {        
             TRACE_THREAD("PTSIG_KILL: arg1=%ld, arg2=%ld", arg1, arg2);
+            long retval;
             /* Send signal to specific thread */
             struct thread *target = NULL;
             struct proc *p = curproc;
@@ -342,30 +343,44 @@ long _cdecl sys_p_thread_signal(long func, long arg1, long arg2) {
             }
             
             /* Send signal to target thread */
-            TRACE_THREAD("PTSIG_KILL: Sending signal %ld to thread %d", arg2, target->tid);
-            return proc_thread_signal_kill(target, (int)arg2);
+            TRACE_THREAD("PTSIG_KILL: Trying to Send signal %ld to thread %d", arg2, target->tid);
+            retval = proc_thread_signal_kill(target, (int)arg2);
+            TRACE_THREAD("PTSIG_KILL: Returning %ld to userspace", retval);  // ← ADD THIS
+            return retval;
             }
 
         case PTSIG_GETMASK:
-            return proc_thread_signal_sigmask(0);
-            
+            if (CURTHREAD) {
+                TRACE_THREAD("K: PTSIG_GETMASK returning t->t_sigmask=0x%08lx for tid=%d",
+                            (ulong)CURTHREAD->t_sigmask, CURTHREAD->tid);
+                return CURTHREAD->t_sigmask;
+            }
+            return 0;
         case PTSIG_SETMASK:
-            return proc_thread_signal_sigmask(arg1);
+            return proc_thread_signal_sigmask((ulong)arg1);
             
         case PTSIG_BLOCK:
-            return proc_thread_signal_sigblock((ulong)arg1);
-            
+            {   
+                #ifdef DEBUG_THREAD
+                struct thread *t = CURTHREAD;
+                TRACE_THREAD("K: PTSIG_BLOCK arg=0x%08lx for tid=%d (before t_sigmask=0x%08lx)",
+                            (ulong)arg1, t ? t->tid : -1, t ? t->t_sigmask : 0UL);
+                #endif
+                return proc_thread_signal_sigblock((ulong)arg1);
+            }
         case PTSIG_UNBLOCK:
             {
                 struct thread *t = CURTHREAD;
                 if (!t) return EINVAL;
+                TRACE_THREAD("K: PTSIG_UNBLOCK arg=0x%08lx for tid=%d (before t_sigmask=0x%08lx)",
+                            (ulong)arg1, t ? t->tid : -1, t ? t->t_sigmask : 0UL);                
                 ulong old_mask = t->t_sigmask;
                 t->t_sigmask &= ~(arg1 & ~UNMASKABLE);
                 return old_mask;
             }
             
         case PTSIG_WAIT:
-            return proc_thread_signal_sigwait(arg1, arg2);
+            return proc_thread_signal_sigwait((ulong)arg1, (long)arg2);
             
         case PTSIG_HANDLER:
             TRACE_THREAD("sys_p_thread_signal -> proc_thread_signal_sighandler: PROC ID %d, THREAD ID %d, SIG %ld, HANDLER %lx, ARG %p", 
@@ -424,9 +439,13 @@ long _cdecl sys_p_thread_signal(long func, long arg1, long arg2) {
              */
             {
                 struct sigqueue_params params;
-                
+                #ifdef DEBUG_THREAD
+                struct sigqueue_params *params_debug = (struct sigqueue_params *)arg1;
                 TRACE_THREAD("PTSIG_QUEUE: arg1=%p (address of params struct)", (void*)arg1);
-                
+                TRACE_THREAD("PTSIG_QUEUE: before copyin - pid=%ld, sig=%ld, value=%ld/%p",
+                            params_debug->pid, params_debug->sig, 
+                            params_debug->value.sival_int, params_debug->value.sival_ptr);
+                #endif
                 if (copyin((void*)arg1, &params, sizeof(params))) {
                     TRACE_THREAD("PTSIG_QUEUE: copyin failed");
                     return EFAULT;
@@ -436,7 +455,7 @@ long _cdecl sys_p_thread_signal(long func, long arg1, long arg2) {
                             params.pid, params.sig, 
                             params.value.sival_int, params.value.sival_ptr);
                 
-                return sys_p_sigqueue(params.pid, params.sig, params.value);
+                return sys_p_sigqueue((short)params.pid, (int)params.sig, (const union sigval)params.value);
             }
 
         case PTSIG_EXT_HANDLER:

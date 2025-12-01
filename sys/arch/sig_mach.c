@@ -59,34 +59,55 @@ struct sigcontext
 int
 sendsig(ushort sig)
 {
-	struct sigaction *sigact = &(SIGACTION(curproc, sig));
+	struct proc *p = curproc;
+	struct thread *t = ((curproc && curproc->current_thread) ? curproc->current_thread : NULL);
+	struct sigaction *sigact;
 	unsigned long oldstack, newstack;
 	unsigned long *stack;
 	struct user_things *ut;
 	struct sigcontext *sigctxt;
 	CONTEXT *call, contexts[2];
-	
-	// /* Check if this is an extended SA_SIGINFO handler */
-	// int is_siginfo = (sigact->sa_flags & SA_SIGINFO) && 
-	//                  (curproc->p_sigacts->sa_sigaction_ext[sig] != NULL);
-	int is_siginfo = (curproc->p_sigacts->sa_sigaction_ext[sig] != NULL);					 
-	TRACE_THREAD("sendsig: preparing to send signal %d to pid %d (is_siginfo=%d)", sig, curproc->pid, is_siginfo);
-	/* siginfo_t structure for extended handlers */
+	int is_siginfo;
 	siginfo_t *siginfo_ptr = NULL;
 	struct sigqueue_entry *entry = NULL;
-
-	/* Variables to track original thread state */
 	void *stack_base_for_validation;
 	size_t stack_size_for_validation;
 
 # define newcurrent (contexts[0])
 # define oldsysctxt (contexts[1])
 
-	assert(curproc->stack_magic == STACK_MAGIC);
+	/* NEW: Use current thread context if threading enabled */
+	if (p->p_sigacts && p->p_sigacts->thread_signals && t && t->magic == CTXT_MAGIC && t->tid > 0) {
+		/* Check thread-specific handler first */
+		if (((sig) > 0 && (sig) < NSIG) && t->sig_handlers[sig].handler) {
+			TRACE_THREAD("sendsig: using thread-specific handler for sig %d, thread %d", 
+			             sig, t->tid);
+			/* Thread signal will be handled via thread_signal_trampoline */
+			/* This path shouldn't normally be reached as thread signals use trampoline */
+			return 0;
+		}
+		
+		/* Use thread stack for validation */
+		stack_base_for_validation = t->stack;
+		stack_size_for_validation = t->stack_size;
+		
+		assert(t->stack_magic == STACK_MAGIC);
+	} else {
+		/* Use process stack */
+		stack_base_for_validation = p->stack;
+		stack_size_for_validation = STKSIZE;
+		
+		assert(p->stack_magic == STACK_MAGIC);
+	}
 
-	/* Store original thread info BEFORE switching */
-	stack_base_for_validation = curproc->stack;
-	stack_size_for_validation = STKSIZE;
+	/* Get the appropriate sigaction */
+	sigact = &(SIGACTION(p, sig));
+	
+	/* Check for extended handler */
+	is_siginfo = (p->p_sigacts->sa_sigaction_ext[sig] != NULL);
+	
+	TRACE_THREAD("sendsig: preparing to send signal %d to pid %d (is_siginfo=%d), current thread id = %d", 
+	             sig, p->pid, is_siginfo, (t ? t->tid : -1));
 
 	/* another kludge: there is one case in which the p_sigreturn
 	 * mechanism is invoked by the kernel, namely when the user
@@ -126,7 +147,7 @@ sendsig(ushort sig)
 	}
 	
 	++curproc->nsigs;
-	TRACE_THREAD("sendsig: preparing to send signal %d to pid %d", sig, curproc->pid);
+
 	if (curproc->p_flag & P_FLAG_SYS)
 	{
 		/* This is a system process, e.g. a kernel thread. We can't
@@ -207,15 +228,15 @@ sendsig(ushort sig)
 	 */
 	ut = curproc->p_mem->tp_ptr;
 
-	TRACE_THREAD("sendsig: old stack=%lx, new stack=%lx, usp=%lx, ssp=%lx, sr=%x", 
-	             oldstack, newstack, call->usp, call->ssp, call->sr);
+	// TRACE_THREAD("sendsig: old stack=%lx, new stack=%lx, usp=%lx, ssp=%lx, sr=%x", 
+	//              oldstack, newstack, call->usp, call->ssp, call->sr);
 
 	/* For SA_SIGINFO handlers, we need to pass siginfo_t */
 	if (is_siginfo) {
 		unsigned short sr;
 		siginfo_t temp_info;
 		
-		TRACE_THREAD("sendsig: SA_SIGINFO handler for sig %d", sig);
+		// TRACE_THREAD("sendsig: SA_SIGINFO handler for sig %d", sig);
 		
 		/* Check if this signal is queued with siginfo data */
 		sr = splhigh();
@@ -244,17 +265,17 @@ sendsig(ushort sig)
 		stack -= (sizeof(siginfo_t) + sizeof(long) - 1) / sizeof(long);
 		siginfo_ptr = (siginfo_t *)stack;
 		
-		TRACE_THREAD("sendsig: user stack=%p, siginfo_ptr=%p, sizeof(siginfo_t)=%d", 
-					(void*)stack, siginfo_ptr, sizeof(siginfo_t));
+		// TRACE_THREAD("sendsig: user stack=%p, siginfo_ptr=%p, sizeof(siginfo_t)=%d", 
+		// 			(void*)stack, siginfo_ptr, sizeof(siginfo_t));
 		
 		/* Use proper copyout to copy from kernel to user space */
 		if (copyout(&temp_info, siginfo_ptr, sizeof(siginfo_t))) {
-			TRACE_THREAD("sendsig: copyout failed for siginfo_t");
+			// TRACE_THREAD("sendsig: copyout failed for siginfo_t");
 			return 1;
 		}
 		
-		TRACE_THREAD("sendsig: siginfo copied to user space, si_signo=%d, si_value=%d", 
-					temp_info.si_signo, temp_info.si_value.sival_int);
+		// TRACE_THREAD("sendsig: siginfo copied to user space, si_signo=%d, si_value=%d", 
+		// 			temp_info.si_signo, temp_info.si_value.sival_int);
 	}
 	TRACE_THREAD("sendsig: building sigcontext at stack=%p", stack);
 
@@ -275,16 +296,16 @@ sendsig(ushort sig)
 		 *   [context]         ← arg 3, pushed first, stack points here
 		 */
 		TRACE_THREAD("sendsig: pushing SA_SIGINFO args: sig=%d, info=%p", sig, siginfo_ptr);
-		TRACE_THREAD("sendsig: stack=%p, user stack will be at %p", stack, stack - 4);
+		// TRACE_THREAD("sendsig: stack=%p, user stack will be at %p", stack, stack - 4);
 		
 		*(--stack) = (unsigned long) NULL;           /* arg3: context (unused) */
 		*(--stack) = (unsigned long) siginfo_ptr;    /* arg2: siginfo pointer */
 		*(--stack) = (unsigned long) sig;            /* arg1: signal number */
 		*(--stack) = ut->sig_return_p;               /* return address */
 		
-		TRACE_THREAD("sendsig: final stack=%p, args: [ret=%lx] [sig=%lx] [info=%lx] [ctx=%lx]",
-		             stack, stack[0], stack[1], stack[2], stack[3]);
-		TRACE_THREAD("sendsig: handler address = %p", curproc->p_sigacts->sa_sigaction_ext[sig]);
+		// TRACE_THREAD("sendsig: final stack=%p, args: [ret=%lx] [sig=%lx] [info=%lx] [ctx=%lx]",
+		//              stack, stack[0], stack[1], stack[2], stack[3]);
+		// TRACE_THREAD("sendsig: handler address = %p", curproc->p_sigacts->sa_sigaction_ext[sig]);
 		
 		/* Use the extended handler address */
 		call->pc = (unsigned long)curproc->p_sigacts->sa_sigaction_ext[sig];

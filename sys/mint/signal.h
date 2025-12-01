@@ -64,7 +64,7 @@ typedef unsigned long int sigset_t;
 
 /* Signal value union - use kernel types */
 union sigval {
-	long sival_int;        /* Integer value (use long for portability) */
+	long int sival_int;        /* Integer value (use long for portability) */
 	void *sival_ptr;       /* Pointer value */
 };
 
@@ -75,13 +75,13 @@ union sigval {
 
 /* siginfo_t structure for extended signal information */
 typedef struct {
-	int si_signo;           /* Signal number */
-	int si_code;            /* Signal code */
-	int si_errno;           /* If non-zero, an errno value */
+	long int si_signo;           /* Signal number */
+	long int si_code;            /* Signal code */
+	long int si_errno;           /* If non-zero, an errno value */
 	short si_pid;           /* Sending process ID (use short like kernel pid) */
 	unsigned short si_uid;  /* Real user ID (use unsigned short) */
 	void *si_addr;          /* Address of faulting instruction */
-	int si_status;          /* Exit value or signal */
+	long int si_status;          /* Exit value or signal */
 	long si_band;           /* Band event for SIGPOLL */
 	union sigval si_value;  /* Signal value */
 } siginfo_t;
@@ -114,7 +114,6 @@ struct sigaction
 	unsigned long  sa_handler;	/* pointer to signal handler */
 	unsigned long  sa_mask;		/* additional signals masked during delivery */
 	unsigned short sa_flags;	/* signal specific flags */
-	// void (*sa_sigaction)(int, siginfo_t *, void *); /* POSIX extension */
 };
 
 /* signal handler values */

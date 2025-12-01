@@ -22,6 +22,8 @@
 #include "proc_threads_queue.h"
 #include "proc_threads_scheduler.h"
 #include "proc_threads_cancel.h"
+#include "proc_threads_signal.h"
+
 
 /* Maximum value for an unsigned long */
 #ifndef ULONG_MAX
@@ -51,10 +53,10 @@ int wake_threads_by_time(struct proc *p, unsigned long current_time) {
     // First pass: build bitmap of wakeable priorities
     for (t = p->sleep_queue; t; t = t->next_sleeping) {
         if (t->magic == CTXT_MAGIC &&
-            (t->state & THREAD_STATE_BLOCKED) &&
-            !(t->state & THREAD_STATE_EXITED) &&
-            t->wakeup_time > 0 &&
-            t->wakeup_time <= current_time) {
+            (t->state & THREAD_STATE_BLOCKED) && !(t->state & THREAD_STATE_EXITED) &&
+            ( (t->wakeup_time > 0 && t->wakeup_time <= current_time) || (t->t_sigpending & ~THREAD_SIGMASK(t)) )
+        
+        ) {
             
             wakeable_bitmap |= (1 << t->priority);
             total_wakeable++;
@@ -85,8 +87,8 @@ int wake_threads_by_time(struct proc *p, unsigned long current_time) {
                 (t->state & THREAD_STATE_BLOCKED) &&
                 !(t->state & THREAD_STATE_EXITED) &&
                 t->priority == highest_pri &&
-                t->wakeup_time > 0 &&
-                t->wakeup_time <= current_time) {
+                ( (t->wakeup_time > 0 && t->wakeup_time <= current_time) || (t->t_sigpending & ~THREAD_SIGMASK(t)) )
+            ) {
                 
                 TRACE_THREAD("SLEEP_CHECK: Thread %d should wake up!", t->tid);
                 
@@ -127,8 +129,6 @@ void check_and_wake_sleeping_threads(struct proc *p) {
     if (!p || !p->sleep_queue) {
         return;
     }
-    register unsigned short sr;
-    int woke_threads;
 
     #ifdef DEBUG_THREAD
     unsigned long current_time = get_system_ticks();
@@ -147,26 +147,22 @@ void check_and_wake_sleeping_threads(struct proc *p) {
         debug_t = debug_t->next_sleeping;
     }
     #endif
-
-    sr = splhigh();
     
     // Wake threads that have reached their wakeup time
-    woke_threads = wake_threads_by_time(p, get_system_ticks());
-    
-    if (woke_threads > 0) {
-        TRACE_THREAD("SLEEP_CHECK: Woke up %d threads from sleep queue", woke_threads);
-        // Force a schedule if we woke up any threads and this is the current process
-        if (p == curproc) {
-            TRACE_THREAD("SLEEP_CHECK: Forcing schedule after waking threads");
-            spl(sr);
-            proc_thread_schedule();
-            return;
-        }        
-    }
-    
-    spl(sr);
+    wake_threads_by_time(p, get_system_ticks());
 }
 
+/**
+ * @brief Thread sleep wakeup handler
+ * 
+ * This function is called when a thread's sleep timer expires. It checks
+ * the validity of the thread and ensures it is actually sleeping before
+ * waking it up. If the thread was cancelled during its sleep, it will
+ * be terminated instead of waking up.
+ *
+ * @param p Process containing the thread to wake up
+ * @param arg Pointer to the thread to wake up
+ */
 void proc_thread_sleep_wakeup_handler(PROC *p, long arg) {
     struct thread *t = (struct thread *)arg;
     
@@ -190,11 +186,9 @@ void proc_thread_sleep_wakeup_handler(PROC *p, long arg) {
     
     TRACE_THREAD("SLEEP_WAKEUP: Valid wakeup for thread %d", t->tid);
     
-    register unsigned short sr = splhigh();
 
     // Check for cancellation before waking up
     if (t->cancel_pending && t->cancel_state == PTHREAD_CANCEL_ENABLE) {
-        spl(sr);
         check_thread_cancellation(t);
         return;
     }
@@ -214,7 +208,6 @@ void proc_thread_sleep_wakeup_handler(PROC *p, long arg) {
     add_to_ready_queue(t);
     
     // Force a schedule to run this thread immediately if possible
-    spl(sr);
 
     reschedule_preemption_timer(p, t->tid);
     proc_thread_schedule();
@@ -225,8 +218,6 @@ void proc_thread_sleep_wakeup_handler(PROC *p, long arg) {
  */
 void cleanup_thread_sleep_state(struct thread *t) {
     if (!t) return;
-    
-    register unsigned short sr = splhigh();
     
     // Cancel sleep timeout if active
     if (t->sleep_timeout) {
@@ -246,13 +237,12 @@ void cleanup_thread_sleep_state(struct thread *t) {
         }
     }
     
-    spl(sr);
+    return;
 }
 
 long proc_thread_sleep(long ms) {
     struct proc *p = curproc;
     struct thread *t = p ? p->current_thread : NULL;
-    register unsigned short sr;
     
     TRACE_THREAD("SLEEP: Thread %d sleeping for %d ms", t->tid, ms);
     if (!p || !t) return EINVAL;
@@ -269,7 +259,7 @@ long proc_thread_sleep(long ms) {
 
     unsigned long current_time = get_system_ticks();
     unsigned long ticks;
-
+    long ret = 0;
     // Handle special cases
     if (ms <= 0) {
         // No sleep or invalid sleep time
@@ -288,9 +278,6 @@ long proc_thread_sleep(long ms) {
 
     TRACE_THREAD_SLEEP(t, ms, ticks, t->wakeup_time);
     
-    // Add to sleep queue
-    sr = splhigh();
-    
     // Remove from sleep queue if already there
     remove_from_sleep_queue(p, t);
     
@@ -307,7 +294,6 @@ long proc_thread_sleep(long ms) {
         t->sleep_timeout->arg = (long)t;
     } else {
         TRACE_THREAD("SLEEP: Failed to set up sleep timeout");
-        spl(sr);
         return -1;
     }
  
@@ -325,9 +311,8 @@ long proc_thread_sleep(long ms) {
         atomic_thread_state_change(t, THREAD_STATE_BLOCKED);
         t->wait_type |= WAIT_SLEEP;  // Set wait type
         remove_from_ready_queue(t);
-        
+        t->cpu_time += (get_system_ticks() - t->last_scheduled); // Update CPU time before sleeping
         // Schedule another thread
-        spl(sr);
         proc_thread_schedule();
         
         // We should never reach here - proc_thread_schedule() will switch to another thread
@@ -336,7 +321,20 @@ long proc_thread_sleep(long ms) {
     } else {
         // Second time through - this is the "waking up" path
         // This code runs when the thread is awakened and context is restored
+
         pthread_testcancel_internal(t);
+
+        // Check for pending signals before going to sleep
+        if (t->t_sigpending) {
+            ulong pending_unmasked = t->t_sigpending & ~THREAD_SIGMASK(t);
+            if (pending_unmasked) {
+                // t->cpu_time += 1; // Increment CPU time to avoid being "too new"
+                TRACE_THREAD("SLEEP: Thread %d has pending signals 0x%lx, not sleeping (cpu_time=%lu, last_scheduled=%lu)", t->tid, pending_unmasked, t->cpu_time, t->last_scheduled);
+                dispatch_thread_signals(t);
+            }
+        } else {
+            TRACE_THREAD("SLEEP: Thread %d has no pending signals, proceeding to wakeup", t->tid);
+        }
         // When we return, check if we woke up on time
         current_time = get_system_ticks();
         if (t->wakeup_time > 0 && current_time > t->wakeup_time) {
@@ -351,10 +349,9 @@ long proc_thread_sleep(long ms) {
             TRACE_THREAD("SLEEP: Thread %d not in RUNNING state after wake, fixing", t->tid);
             atomic_thread_state_change(t, THREAD_STATE_RUNNING);
         }
-        
+
         TRACE_THREAD_WAKEUP(t);
-        spl(sr);
-        return 0;
+        return ret;
     }
 }
 
@@ -369,7 +366,9 @@ long proc_thread_yield(void) {
     }
     if(p->current_thread->tid == 0) {
         TRACE_THREAD("YIELD: Thread %d yielded, rescheduling", p->current_thread->tid);
+        // if(p->num_threads <= 1) 
         yield();
+        // else proc_thread_schedule();
         return 0;
     }
     if(p->current_thread->is_idle) {
@@ -380,7 +379,7 @@ long proc_thread_yield(void) {
                 
     t = p->current_thread;
     
-    // CRITICAL FIX: Check if yield is beneficial
+    // Check if yield is beneficial
     unsigned long now = get_system_ticks();
     unsigned long elapsed = now - t->last_scheduled;
     

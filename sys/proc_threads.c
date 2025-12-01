@@ -197,18 +197,19 @@ static long create_thread(struct proc *p, void *(*func)(void*), void *arg, void*
     // t->priority_boost = (t->tid > 0) ? 1 : 0;
     t->priority_boost = 0;
 
-    // if (t->tid > 0) {
-    //     t->priority = THREAD_CREATION_PRIORITY_BOOST;
-    //     TRACE_THREAD("Applied priority boost to new thread %d: priority %d", 
-    //                 t->tid, t->priority);        
-    // }
-
     /* Initialize thread-specific data */
     t->tsd_data = NULL;
 
     /* Initialize signal fields */
     t->t_sigpending = 0;
-    THREAD_SIGMASK_SET(t, p->p_sigmask);  /* Inherit process signal mask */
+
+    /* Inherit signal mask from current thread for POSIX compliance */
+    if (p->current_thread && p->current_thread->magic == CTXT_MAGIC) {
+        THREAD_SIGMASK_SET(t, THREAD_SIGMASK(p->current_thread));
+    } else {
+        THREAD_SIGMASK_SET(t, p->p_sigmask);
+    }    
+
     t->t_sig_in_progress = 0;
     t->alarm_timeout = NULL;
     t->sig_stack = NULL;
@@ -263,7 +264,11 @@ static long create_thread(struct proc *p, void *(*func)(void*), void *arg, void*
     t->errno_ptr = NULL;  // Initialize errno pointer to NULL
     t->cleanup_stack = NULL; // No cleanup handlers initially
     t->tsd_data = NULL; // Start with NULL TSD data
-    
+
+    t->t_sigqueue_head = NULL;
+    t->t_sigqueue_tail = NULL;
+    t->t_sigqueue_count = 0;    
+
         TRACE_THREAD("Thread %d stack: base=%p, top=%p, size=%zu", 
                  t->tid, t->stack, t->stack_top, stack_size);
     
@@ -405,10 +410,18 @@ static void init_main_thread_context(struct proc *p) {
     /* Thread0 uses process TSD data */
     t0->tsd_data = p->proc_tsd_data;
 
+    t0->t_sigqueue_head = NULL;
+    t0->t_sigqueue_tail = NULL;
+    t0->t_sigqueue_count = 0;
+
     p->threads = t0;
     p->current_thread = t0;
     p->num_threads = 1;
     p->total_threads = 1;
+
+    /* Initialize thread signal handling - ENABLED by default for POSIX compliance */
+    p->p_sigacts->thread_signals = 1;
+    p->p_sigacts->flags |= SAS_THREADED;  /* Also enable threaded flag */    
 
     atomic_thread_state_change(t0, THREAD_STATE_RUNNING);
     TRACE_THREAD("INIT CONTEXT: Thread id. %d initialized for process %d, CURRENT -> ssp %lx, usp %lx, pc %lx",t0->tid, p->pid, t0->ctxt[CURRENT].ssp, t0->ctxt[CURRENT].usp, t0->ctxt[CURRENT].pc);
@@ -628,6 +641,10 @@ static struct thread* create_idle_thread(struct proc *p) {
     idle->cancel_pending = 0; // No pending cancellation    
     idle->errno_ptr = NULL;  // Initialize errno pointer to NULL
     idle->cleanup_stack = NULL; // No cleanup handlers
+
+    idle->t_sigqueue_head = NULL;
+    idle->t_sigqueue_tail = NULL;
+    idle->t_sigqueue_count = 0;
 
     // Initialize context
     init_thread_context(idle, idle_thread_func, (void *)p);

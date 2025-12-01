@@ -25,6 +25,7 @@ long _cdecl sys_p_sigwaitinfo(const sigset_t *set, siginfo_t *info);
 long _cdecl sys_p_sigtimedwait(const sigset_t *set, siginfo_t *info, 
                                const struct timespec *timeout);
 long _cdecl sys_p_sigqueue(short pid, int sig, const union sigval value);
+
 void cleanup_signal_queue(PROC *p);
 
 # endif /* _dossig_h */

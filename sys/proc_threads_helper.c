@@ -337,7 +337,7 @@ long sys_p_thread_getid(void) {
  * @param tid Thread ID to find
  * @return Pointer to thread if found, NULL otherwise
  */
-struct thread *get_thread_by_id(struct proc *p, short tid) {
+struct thread *proc_thread_find(struct proc *p, short tid) {
     if (!p || tid < 0) {
         return NULL;
     }

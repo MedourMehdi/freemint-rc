@@ -674,11 +674,11 @@ sleep(int _que, long cond)
 	rm_q(READY_Q, p);
 	spl(sr);
 
-	if(curproc->current_thread) TRACE_THREAD("PROC_SLEEP WARNING: %d", p->pid);
+	// if(curproc->current_thread) TRACE_THREAD("PROC_SLEEP WARNING: %d", p->pid);
 
 	/* Switch to main thread for multi-threaded processes */
 	if (curproc->current_thread) {
-		TRACE_THREAD("SLEEP save_context THREAD ID %d", curproc->current_thread->tid);
+		// TRACE_THREAD("SLEEP save_context THREAD ID %d", curproc->current_thread->tid);
 		_ctx = &(curproc->current_thread->ctxt[SYSCALL]);
 	} else {
 		_ctx = &(curproc->ctxt[CURRENT]);
@@ -704,8 +704,9 @@ sleep(int _que, long cond)
 
 	/* Switch to main thread for multi-threaded processes */
 	if (curproc->current_thread) {
-		TRACE_THREAD("SLEEP change_context THREAD ID %d", curproc->current_thread->tid);
+		// TRACE_THREAD("SLEEP change_context THREAD ID %d", curproc->current_thread->tid);
 		_ctx = &(curproc->current_thread->ctxt[SYSCALL]);
+		// curproc->current_thread->last_scheduled = get_system_ticks();
 	} else {
 		_ctx = &(curproc->ctxt[CURRENT]);
 	}

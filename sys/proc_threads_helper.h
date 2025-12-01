@@ -38,7 +38,7 @@ int find_highest_priority_bit(unsigned char bitmap);
 int find_highest_priority_bit_word(unsigned short bitmap);
 int scale_thread_priority(int priority);
 
-struct thread *get_thread_by_id(struct proc *p, short tid);
+struct thread *proc_thread_find(struct proc *p, short tid);
 
  /* TAS-based atomic operations */
 inline int tas_try_lock(volatile unsigned char *lock_byte);

@@ -127,6 +127,7 @@ struct thread {
     /* Scheduling and timing */
     unsigned long wakeup_time;      /* Wakeup time in ticks */
     unsigned long last_scheduled;   /* Last time this thread was scheduled (in ticks) */
+	unsigned long cpu_time;         /* Total CPU time used by this thread (in ticks) */
 
     /* Thread join fields */
     void *retval;                /* Return value from proc_thread_exit */
@@ -153,6 +154,10 @@ struct thread {
         void *arg;
     } sig_handlers[32];
 	int * errno_ptr;                   /* Pointer to thread-specific errno */
+	/* Signal queue for real-time signals (per-thread) */
+	struct sigqueue_entry *t_sigqueue_head;
+	struct sigqueue_entry *t_sigqueue_tail;
+	int t_sigqueue_count;
 };
 
 /**

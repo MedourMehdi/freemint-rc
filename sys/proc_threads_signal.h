@@ -23,6 +23,8 @@
 /* Thread signal handling macros */
 # define IS_THREAD_SIGNAL(sig) ((sig) > 0 && (sig) < NSIG)
 # define IS_THREAD_USER_SIGNAL(sig) ((sig) == SIGUSR1 || (sig) == SIGUSR2)
+# define CLEAR_THREAD_SIGPENDING(t,s) ((t)->t_sigpending &= ~(1UL << (s))) 
+# define THREAD_SIGNAL_MASK ((1UL << SIGUSR1) | (1UL << SIGUSR2)) /* Mask for all valid thread signals (only SIGUSR1 and SIGUSR2) */
 # define SET_THREAD_SIGPENDING(t,s) ((t)->t_sigpending |= (1UL << (s)))
 
 #define THREAD_SIGMASK(t)          ((t)->t_sigmask)
@@ -87,12 +89,19 @@ long _cdecl proc_thread_signal_sigalrm(struct thread *t, long ms);
 long _cdecl sys_p_thread_sigsetmask(ulong mask);
 /* Temporarily set signal mask and pause until a signal is received */
 long _cdecl sys_p_thread_sigpause(ulong mask);
+/* Signal return from signal handler */
+long _cdecl proc_thread_sigreturn(void);
 
 /* Internal functions - to be called from thread lifecycle functions */
-void init_thread_signals(struct proc *p);
 void cleanup_thread_signals(struct thread *t);
 void cleanup_signal_stack(PROC *p, long arg);
 /* Checks for pending signals in a thread, returns signal number or 0 */
 int check_thread_signals(struct thread *t);
 void handle_thread_signal(struct thread *t, int sig);
+
+int dequeue_signal_info(PROC *p, struct thread *t, const sigset_t *set, siginfo_t *info);
+
+/* Delivers a signal to a specific thread, returns 1 if delivered, 0 otherwise */
+int deliver_signal_to_thread(struct proc *p, struct thread *t, int sig, const siginfo_t *info);
+
 #endif /* PROC_THREADS_SIGNAL_H */

@@ -109,7 +109,8 @@ killgroup (int pgrp, ushort sig, int priv)
 	if (pgrp < 0)
 		return EINTERNAL;
 
-	if (sig >= NSIG)
+	// if (sig >= NSIG)
+	if (sig < 0 || sig >= NSIG)
 		return EINVAL;
 
 	for (p = proclist; p; p = p->gl_next)
@@ -149,6 +150,15 @@ post_sig (PROC *p, ushort sig)
 	unsigned long sigm;
 	/* Thread signal handling support */
 	int delivered = 0;
+
+	/* CRITICAL: NEVER post signal 0 */
+	if (sig == 0) {
+		// ALERT("KERNEL BUG: post_sig called with sig=0");
+		/* This should never happen - kill/ikill filter sig=0 */
+		/* Clear bit 0 if somehow set */
+		p->sigpending &= ~1UL;
+		return;
+	}
 
 	/* just to be sure */
 	assert(sig < NSIG);
@@ -206,20 +216,16 @@ post_sig (PROC *p, ushort sig)
 	sigm = (1L << (unsigned long) sig);
 	
 	/* Check for thread-specific signal handling */
-	if (p->p_sigacts && p->p_sigacts->thread_signals) {
+	if (p->p_sigacts && p->p_sigacts->thread_signals && p->current_thread && p->current_thread->tid > 0) {
 		/* Skip thread-specific handling for thread0 */
-		// if (p->current_thread && p->current_thread->tid != 0) {
-		if (p->current_thread) {
-			/* Try thread-aware signal delivery */
-			if (proc_thread_signal_aware_raise(p, sig) == 0) {
-				delivered = 1;
-			}
-			
-			/* If signal was delivered to a thread, check if we need to wake up any threads */
-			if (delivered && p->current_thread) {
-				/* Dispatch signals to current thread */
-				dispatch_thread_signals(p->current_thread);
-			}
+		/* Try thread-aware signal delivery */
+		if (proc_thread_signal_aware_raise(p, sig) == 0) {
+			delivered = 1;
+		}
+		/* If signal was delivered to a thread, check if we need to wake up any threads */
+		if (delivered && p->current_thread) {
+			/* Dispatch signals to current thread */
+			dispatch_thread_signals(p->current_thread);
 		}
 	}
 
@@ -260,7 +266,8 @@ ikill (int pid, ushort sig)
 	PROC *p;
 	long r;
 
-	if (sig >= NSIG)
+	// if (sig >= NSIG)
+	if (sig < 0 || sig >= NSIG)
 		return EBADARG;
 
 	if (pid < 0)
@@ -303,17 +310,19 @@ check_sigs (void)
 		
 	/* Check for thread-specific signals if we have a current thread */
 	if (p->p_sigacts && p->p_sigacts->thread_signals && p->current_thread 
-		// &&  p->current_thread->tid != 0
+		&&  p->current_thread->tid > 0
 	) {
 		dispatch_thread_signals(p->current_thread);
+		return;
 	}
-	
 top:
 	assert (p->p_sigacts);
+	
+	/* CRITICAL: Clear bit 0 if somehow set */
+	p->sigpending &= ~1UL;
 	sigs = p->sigpending;
-
 	/* Always notify the tracer about signals sent */
-	if (!p->ptracer || p->sigpending & 1L)
+	if (!p->ptracer)
 		sigs &= ~(p->p_sigmask);
 
 	if (sigs)
@@ -321,12 +330,12 @@ top:
 		sigm = 2;
 
 		/* with tracing we need a mechanism to allow a signal to be
-		 * delivered to the child (curproc); Fcntl(...TRACEGO...)
-		 * passes a SIGNULL to indicate that we should really deliver
-		 * the signal, hence its always safe to remove it from pending.
+		 * delivered to the child (curproc)
+		 * CRITICAL: Old code used signal 0 bit for Fcntl(...TRACEGO...)
+		 * to indicate that we should really deliver the signal - this is
+		 * now disabled
 		 */
-		deliversig = (p->sigpending & 1L);
-		p->sigpending &= ~1L;
+		deliversig = 0;
 
 		for (i = 1; i < NSIG; i++)
 		{
@@ -393,6 +402,11 @@ top:
 void _cdecl
 raise (ushort sig)
 {
+	/* CRITICAL: Never raise signal 0 */
+	if (sig == 0) {
+		// ALERT("KERNEL BUG: raise called with sig=0");
+		return;
+	}	
 	post_sig (get_curproc(), sig);
 	check_sigs ();
 }
@@ -405,6 +419,11 @@ handle_sig (ushort sig)
 {
 	/* just to be sure */
 	assert (sig < NSIG);
+	/* CRITICAL: Never handle signal 0 */
+	if (sig == 0) {
+		// ALERT("KERNEL BUG: handle_sig called with sig=0");
+		return;
+	}	
 	assert (get_curproc()->p_sigacts);
 	/* notify proc extensions */
 	proc_ext_on_signal(get_curproc(), sig);
