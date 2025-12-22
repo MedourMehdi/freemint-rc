@@ -25,6 +25,9 @@
 #include "proc_threads_scheduler.h"
 #include "proc_threads_cancel.h"
 #include "arch/kernel.h"
+#include "signal.h"
+
+#define MIN_THREAD_RUNTIME_TICKS 10  /* Minimum ticks a thread must have run before receiving signals */
 
 /* Thread timeout handling */
 static void thread_timeout_sighandler(PROC *p, long arg);
@@ -166,7 +169,6 @@ static void thread_signal_trampoline(int sig, struct thread *t)
     t->sig_ctx.regs[0] = sig;                    /* D0 = signal number */
     t->sig_ctx.regs[1] = (unsigned long)handler_arg; /* D1 = handler argument */
 
-    /* ========== PROPER M68K STACK SETUP ========== */
     /* M68K calling convention: parameters pushed right-to-left on stack */
     /* Stack grows downward, so we push return address first, then parameters */
     
@@ -186,7 +188,6 @@ static void thread_signal_trampoline(int sig, struct thread *t)
     *stack = (unsigned long)signal_handler_return;  // Return address
     
     t->sig_ctx.usp = (unsigned long)stack;
-    /* ============================================= */
         
     TRACE_THREAD("SIGNAL TRAMPOLINE: Signal context prepared for thread %d", t->tid);
     TRACE_THREAD("  Handler PC=%lx (USER MODE), SR=%x", t->sig_ctx.pc, t->sig_ctx.sr);
@@ -196,101 +197,93 @@ static void thread_signal_trampoline(int sig, struct thread *t)
     TRACE_THREAD("  Return address=%lx (signal_handler_return)", 
                  (unsigned long)signal_handler_return);
     
-    /* ========== ADD THIS CRITICAL FIX ========== */
-    /* CRITICAL FIX: Copy signal context to SYSCALL context 
+    /* Copy signal context to SYSCALL context 
      * This makes the signal handler execute when we return from the current syscall */
     memcpy(&t->ctxt[SYSCALL], &t->sig_ctx, sizeof(CONTEXT));
-    
-    /* Also update process context for consistency */
-    // memcpy(&t->proc->ctxt[SYSCALL], &t->sig_ctx, sizeof(CONTEXT));
-    if (t->proc->current_thread == t && t->tid == 0) {
-        memcpy(&t->proc->ctxt[SYSCALL], &t->sig_ctx, sizeof(CONTEXT));
-    }    
+
+    boost_thread_priority(t, 5);
     
     TRACE_THREAD("SIGNAL TRAMPOLINE: Updated SYSCALL context - will execute handler on syscall return");
     TRACE_THREAD("  SYSCALL context now: PC=%lx, SR=%x, USP=%lx, SSP=%lx",
                  t->ctxt[SYSCALL].pc, t->ctxt[SYSCALL].sr, 
                  t->ctxt[SYSCALL].usp, t->ctxt[SYSCALL].ssp);
-    /* =========================================== */
-    /* CRITICAL FIX: Schedule cleanup to restore mask after handler returns */
-    /* This prevents mask corruption from affecting subsequent sigwait() calls */
-    // t->t_sigmask = t->old_sigmask;  /* Restore immediately to prevent corruption */
-
-    /* Context is ready - get_thread_context() will return sig_ctx because t_sig_in_progress is set */
-    /* The scheduler will switch to this context and handler will execute in user mode */
+    return;
 }
 
 /*
  * Process thread signal
+ * WARNING: For now Non USER_SIGNAL always go to process level
  */
 void handle_thread_signal(struct thread *t, int sig) {
     if (!t || sig <= 0 || sig >= NSIG) {
-        TRACE_THREAD("HANDLE THREAD SIGNAL: invalid parameters");
+        TRACE_THREAD("HANDLE THREAD SIGNAL: ERROR - Invalid thread or invalid parameters");
         CLEAR_THREAD_SIGPENDING(t, 0);
         return;
     }
 
-    if (t->tid == 0) {
-        /* Thread 0 uses process-level handling only */
-        CLEAR_THREAD_SIGPENDING(t, sig);
-        struct proc *p = t->proc;
-        if (p) {
-            p->sigpending |= (1UL << sig);
-        }
-        return;
-    }
-
-    if (t->t_sig_in_progress) {
-        TRACE_THREAD("HANDLE THREAD SIGNAL: already handling signal %d", t->t_sig_in_progress);
-        return;
-    }
-
-    /* ========== CHECK IF THIS IS A THREAD-SPECIFIC SIGNAL ========== */
-    /* Only SIGUSR1 and SIGUSR2 are truly thread-specific */
-    /* All other signals should be handled at process level */
-    
+    /* Non-thread signals always go to process level */
     if (!IS_THREAD_USER_SIGNAL(sig)) {
-        TRACE_THREAD("HANDLE THREAD SIGNAL: signal %d is not thread-specific, routing to process", sig);
         CLEAR_THREAD_SIGPENDING(t, sig);
-        
-        /* Deliver to process instead */
         struct proc *p = t->proc;
-        if (p) {
-            p->sigpending |= (1UL << sig);
-            TRACE_THREAD("HANDLE THREAD SIGNAL: delivered signal %d to process level", sig);
-        }
+        p->sigpending |= (1UL << sig);
         return;
     }
-    /* ============================================================== */
+    
+    /* Thread 0 CAN handle thread-specific signals (SIGUSR1/SIGUSR2)
+     * using the trampoline, just like other threads! Don't redirect to process level!
+     */
+    
+    if (t->t_sig_in_progress || !t->has_run) {
+        TRACE_THREAD("HANDLE THREAD SIGNAL: WARNING - Thread %d already handling signal %d, function called for sig %d or thread %d has not yet run", t->tid, t->t_sig_in_progress, sig, t->tid);
+        return;
+    }
 
-    // Check thread-specific handler first (only for SIGUSR1/SIGUSR2)
-    void (*thread_handler)(int, void*) = t->sig_handlers[sig].handler;
+    /* Thread-specific handlers only for SIGUSR1/SIGUSR2 */
+    void (*thread_handler)(int, void*) = NULL;
+    if (IS_THREAD_USER_SIGNAL(sig)) {
+        thread_handler = t->sig_handlers[sig].handler;
+    }
     
     if (thread_handler) {
-        TRACE_THREAD("HANDLE THREAD SIGNAL: using thread-specific handler for signal %d", sig);
+        TRACE_THREAD("HANDLE THREAD SIGNAL: INFO - using thread-specific handler for signal %d", sig);
         CLEAR_THREAD_SIGPENDING(t, sig);
         thread_signal_trampoline(sig, t);
         return;
     }
-    
-    // FALL BACK to process handler
+
+    /* FALL BACK to process handler */ 
     struct proc *p = t->proc;
     if (p && p->p_sigacts) {
-        struct sigaction *proc_sigaction = &SIGACTION(p, sig);
-        void (*proc_handler)(int) = (void (*)(int))proc_sigaction->sa_handler;
-        
-        if (proc_handler != (void(*)(int))SIG_DFL && 
-            proc_handler != (void(*)(int))SIG_IGN &&
-            proc_handler != NULL) {
+        struct sigaction *sigact = &SIGACTION(p, sig);
+
+        /* CRITICAL FIX: Apply SA_RESETHAND immediately before any dispatch */
+        if (sigact->sa_flags & SA_RESETHAND) {
+            sigact->sa_handler = SIG_DFL;
+            sigact->sa_flags &= ~SA_RESETHAND;
+            if (p->p_sigacts->sa_sigaction_ext[sig]) {
+                p->p_sigacts->sa_sigaction_ext[sig] = NULL;
+            }
+        }
+    
+        /* Now check disposition (may have just been reset above) */
+        if (sigact->sa_handler == SIG_DFL) {
+            TRACE_THREAD("HANDLE THREAD SIGNAL: SIG_DFL for signal %d, routing to process", sig);
+            CLEAR_THREAD_SIGPENDING(t, sig);
+            p->sigpending |= (1UL << sig);
+        }
+
+        if (sigact->sa_handler != SIG_DFL && sigact->sa_handler != SIG_IGN ) {
             TRACE_THREAD("HANDLE THREAD SIGNAL: using process handler for signal %d", sig);
             CLEAR_THREAD_SIGPENDING(t, sig);
             
-            t->sig_handlers[sig].handler = (void(*)(int, void*))proc_handler;
+            t->sig_handlers[sig].handler = (void (*)(int,  void *))sigact->sa_handler;
             t->sig_handlers[sig].arg = NULL;
+
             thread_signal_trampoline(sig, t);
             
             t->sig_handlers[sig].handler = NULL;
             t->sig_handlers[sig].arg = NULL;
+
             return;
         }
     }
@@ -305,14 +298,15 @@ void handle_thread_signal(struct thread *t, int sig) {
     }
     
     /* Case 2: Grace period for handler installation */
-    if (!t->last_scheduled || !t->cpu_time) {
-        TRACE_THREAD("HANDLE THREAD SIGNAL: user signal %d, thread just started, brief grace period", sig);
+    if (!t->last_scheduled) {
+        TRACE_THREAD("HANDLE THREAD SIGNAL: user signal %d, thread just started, brief grace period, last scheduled not set", sig);
         return;
     }
 
     /* Case 3: No handler - default is to ignore SIGUSR1/SIGUSR2 */
     TRACE_THREAD("HANDLE THREAD SIGNAL: no handler for user signal %d, ignoring", sig);
     CLEAR_THREAD_SIGPENDING(t, sig);
+    return;
 }
 
 /*
@@ -330,14 +324,6 @@ int deliver_signal_to_thread(struct proc *p, struct thread *t, int sig, const si
 
     if (t->proc != p) {
         TRACE_THREAD("ERROR - DELIVER SIGNAL TO THREAD: Thread %d in wrong process", t->tid);
-        return 0;
-    }
-
-    /* NEVER deliver signal 0 */
-    if (sig == 0) {
-        TRACE_THREAD("CRITICAL BUG: deliver_signal_to_thread(sig=0) to thread %d", t->tid);
-        /* Clear bit 0 if it got set somehow */
-        t->t_sigpending &= ~1UL;
         return 0;
     }
 
@@ -379,20 +365,11 @@ int deliver_signal_to_thread(struct proc *p, struct thread *t, int sig, const si
             t->wait_type &= ~WAIT_SIGNAL;
             t->sig_wait_obj = NULL;
             t->sleep_reason = 0;
-
-            /* Remove from signal wait queue if it exists */
-            if (p->signal_wait_queue) {
-                struct thread **tp;
-                for (tp = &p->signal_wait_queue; *tp; tp = &(*tp)->next_sigwait) {
-                    if (*tp == t) {
-                        *tp = t->next_sigwait;
-                        t->next_sigwait = NULL;
-                        TRACE_THREAD("DELIVER: Removed thread %d from signal wait queue", t->tid);
-                        break;
-                    }
-                }
-            }
             spl(sr);
+
+            /* Remove from signal wait queue using helper */
+            remove_thread_from_specific_wait_queue(t, WAIT_SIGNAL);  
+
             /* Make thread ready to run */
             atomic_thread_state_change(t, THREAD_STATE_READY);
             if (!is_in_ready_queue(t)) {
@@ -450,7 +427,11 @@ int deliver_signal_to_thread(struct proc *p, struct thread *t, int sig, const si
                      sig, t->tid);
         return 1;
     }
-
+    /* Wake thread if blocked so handler can run */
+    if (t->state & THREAD_STATE_BLOCKED) {
+        atomic_thread_state_change(t, THREAD_STATE_READY);
+        add_to_ready_queue(t);
+    }
     return 1;
 }
 
@@ -459,7 +440,7 @@ int deliver_signal_to_thread(struct proc *p, struct thread *t, int sig, const si
  */
 int proc_thread_signal_aware_raise(struct proc *p, int sig)
 {
-    struct thread *t = NULL;
+    struct thread *t = CURTHREAD;
     
     if (!p || sig < 1 || sig >= NSIG)
         return EINVAL;
@@ -469,26 +450,18 @@ int proc_thread_signal_aware_raise(struct proc *p, int sig)
 
     /* Check if this is targeted at a SPECIFIC thread (tid > 0) */
     /* AND thread-specific handling is enabled */
-    if (p->p_sigacts && p->p_sigacts->thread_signals && 
-        p->current_thread && p->current_thread->tid > 0 && 
-        IS_THREAD_USER_SIGNAL(sig)) {    
+    if (p->p_sigacts && 
+        p->p_sigacts->thread_signals && 
+        t && 
+        // t->tid > 0 && 
+        IS_THREAD_USER_SIGNAL(sig)
+    ) {
 
         TRACE_THREAD("THREAD RAISE: Attempting thread-aware delivery for signal %d", sig);
 
-        int delivered = 0;
+        short delivered = 0;
 
-        if (p->current_thread->tid == 0) goto process_level_delivery;
-
-        /* ========== Try current thread FIRST (including tid 0) ========== */
-        /*
-         * When pthread_kill(pthread_self(), sig) is called:
-         * 1. pthread_self() returns current thread pointer
-         * 2. pthread_kill() calls proc_thread_signal_kill(current_thread, sig)
-         * 3. That calls deliver_signal_to_thread(current_thread, sig)
-         * 4. Which eventually may call this function
-         * 
-         * We should deliver to the current thread if possible.
-         */
+        if (t->tid == 0) goto process_level_delivery;
         
         TRACE_THREAD("THREAD RAISE: Trying current thread %d first", 
                     p->current_thread->tid);
@@ -553,20 +526,25 @@ process_level_delivery:
  */
 int check_thread_signals(struct thread *t)
 {
-    int sig;
     
-    if (!t || !t->proc)
+    if (!t){
+        TRACE_THREAD("CHECK THREAD SIGNALS: invalid thread pointer");
         return 0;
-        
+    }
+
+    int sig;
     ulong pending = (THREAD_SIGPENDING(t) & ~THREAD_SIGMASK(t)) & ~1UL;
      
     /* CRITICAL: Clear bit 0 if somehow set */
     t->t_sigpending &= ~1UL;
     
     if (!pending){
-        TRACE_THREAD("CHECK THREAD SIGNALS: no pending signals for thread %d", t->tid);
+        TRACE_THREAD("CHECK THREAD SIGNALS: no pending signals for thread %d, sigmask %lx", t->tid, THREAD_SIGMASK(t));
         return 0;
     }
+
+    TRACE_THREAD("CHECK THREAD SIGNALS: pending signals %lx for thread %d, sigmask %lx", 
+                 pending, t->tid, THREAD_SIGMASK(t));
 
     /* Find the first pending signal */
     for (sig = 1; sig < NSIG; sig++) {
@@ -654,41 +632,44 @@ long _cdecl proc_thread_signal_mode(int enable)
  */
 long _cdecl proc_thread_signal_sigmask(ulong mask)
 {
-    if (!curproc || !curproc->current_thread) return EINVAL;
-        
-    ulong old_mask = THREAD_SIGMASK(curproc->current_thread);
+    struct thread *t = CURTHREAD;
+    
+    if (!t) return EINVAL;    
+
+    TRACE_THREAD("proc_thread_signal_sigmask: TID=%d, mask=0x%lx, current_mask=0x%lx, thread_signals=%d",
+                 t->tid, mask, THREAD_SIGMASK(t), 
+                 t->proc->p_sigacts ? t->proc->p_sigacts->thread_signals : -1);
 
     if (curproc->current_thread->tid == 0) {
-        ulong proc_old_mask = curproc->p_sigmask;
+        TRACE_THREAD("proc_thread_signal_sigmask: thread0 - setting process mask to 0x%lx", mask);        
+        /* Process-level signal mask */
         curproc->p_sigmask = mask & ~(UNMASKABLE | 1UL);
-        THREAD_SIGMASK_SET(curproc->current_thread, mask & ~(UNMASKABLE | 1UL));
+        THREAD_SIGMASK_SET(curproc->current_thread, mask);
         
         // Sync thread0's pending signals to process level
         curproc->sigpending |= curproc->current_thread->t_sigpending;
-        return proc_old_mask;
-    }
 
-    /* Ensure we're not masking unmaskable signals */
-    mask &= ~(UNMASKABLE | 1UL);
+        return 0;
+    }
     
     /* Directly set new mask while excluding unmaskable signals */
     THREAD_SIGMASK_SET(curproc->current_thread, mask);
 
-    /* CRITICAL: Dispatch any signals that are now unmasked AND have handlers */
+    TRACE_THREAD("proc_thread_signal_sigmask: set thread mask to 0x%lx", mask);
+
+    /* Dispatch any signals that are now unmasked AND have handlers */
     ulong unmasked_pending = THREAD_SIGPENDING(curproc->current_thread) & ~mask;
     if (unmasked_pending) {
+        TRACE_THREAD("proc_thread_signal_sigmask: unmasked_pending=0x%lx", unmasked_pending);
         for (int sig = 1; sig < NSIG; sig++) {
             if ((unmasked_pending & (1UL << sig)) && 
                 curproc->current_thread->sig_handlers[sig].handler) {
-                TRACE_THREAD("proc_thread_signal_sigmask: dispatching signal %d", sig);
+                TRACE_THREAD("proc_thread_signal_sigmask: dispatching signal %d / Calling handle_thread_signal()", sig);
                 handle_thread_signal(curproc->current_thread, sig);
             }
         }
     }
-
-    return old_mask;
-    
-    return old_mask;
+    return 0;
 }
 
 /*
@@ -731,66 +712,29 @@ long _cdecl proc_thread_signal_kill(struct thread *t, int sig)
     }
 
     /* Make sure thread-specific signals are enabled */
-    if (!p->p_sigacts->thread_signals) {
+    if (!p->p_sigacts->thread_signals && !(t->tid == 0)) {
         TRACE_THREAD("THREAD SIGNAL KILL: thread-specific signals are disabled");
         return EINVAL;
     }
 
-    /* CRITICAL: Thread 0 uses process-level signals only */
     if (t->tid == 0) {
-
-        /* Check BOTH thread and process masks */
-
-        ulong combined_mask = THREAD_SIGMASK(t) | p->p_sigmask;
-        if (combined_mask & (1UL << sig)) {
-            TRACE_THREAD("KILL: Signal %d blocked by mask 0x%lx", sig, combined_mask);
-            SET_THREAD_SIGPENDING(t, sig);
-            return 0;
-        }
-
-        /* Deliver to process level */
-        unsigned short sr = splhigh();
-
-        p->sigpending |= (1UL << sig);
+        /* Thread 0 uses the classic FreeMiNT signal path for ALL signals.
+        * This ensures proper signal queuing and delivery via check_sigs().
+        * Signals are NOT delivered via thread trampoline for thread 0.
+        */
         
-        /* ============================================================
-         * CRITICAL FIX: Do NOT wake thread 0 if it's in JOIN
-         * Signals do not interrupt pthread_join() - POSIX requirement
-         * Thread 0 will handle the signal AFTER the join completes
-         * ============================================================ */
+        TRACE_THREAD("THREAD SIGNAL KILL: Using process-level delivery for thread 0, signal %d", sig);
         
-        if (t->state & THREAD_STATE_BLOCKED) {
-            /* Only wake for interruptible wait types */
-            if (t->wait_type & (WAIT_SLEEP | WAIT_SIGNAL)) {
-                TRACE_THREAD("THREAD SIGNAL KILL: waking thread 0 from interruptible wait");
-                
-                remove_thread_from_wait_queues(t);
-                
-                /* Clear only the interruptible wait flags */
-                t->wait_type &= ~(WAIT_SLEEP | WAIT_SIGNAL);
-                
-                atomic_thread_state_change(t, THREAD_STATE_READY);
-                if (!is_in_ready_queue(t)) {
-                    add_to_ready_queue(t);
-                }
-            } else {
-                /* Thread 0 is in JOIN or other non-interruptible wait */
-                TRACE_THREAD("THREAD SIGNAL KILL: thread 0 in non-interruptible wait (type=0x%x), signal will be handled after", 
-                             t->wait_type);
-                /* Signal is pending, will be handled when thread 0 wakes naturally */
-            }
-        }
+        /* Use the classic process signal delivery */
+        post_sig(p, sig);
         
-        /* Traditional process wake mechanism for compatibility */
-        if (p->wait_q && p->wait_q != READY_Q) {
-            rm_q(p->wait_q, p);
-            add_q(READY_Q, p);
-        }
+        /* IMPORTANT: Do NOT call deliver_signal_to_thread() for thread 0!
+        * post_sig() already handles waking the process if it's blocked.
+        * The signal will be delivered via check_sigs() → handle_sig() → sendsig()
+        * when the thread returns to user mode.
+        */
         
-        spl(sr);
-        
-        /* Do NOT call check_sigs() here */
-        return 0;
+        return 0;  /* Success */
     }
 
     /* Deliver signal to thread */
@@ -847,7 +791,7 @@ long _cdecl proc_thread_signal_sighandler(int sig, void (*handler)(int, void*), 
 
     /* Check for pending signals and dispatch immediately */
     if (handler && (THREAD_SIGPENDING(t) & (1UL << sig))) {
-        TRACE_THREAD("THREAD SIGNAL HANDLER: signal %d pending, dispatching immediately", sig);
+        TRACE_THREAD("THREAD SIGNAL HANDLER: signal %d pending, dispatching immediately / Calling handle_thread_signal()", sig);
         /* Dispatch the signal now that we have a handler */
         handle_thread_signal(t, sig);
     }
@@ -1118,18 +1062,13 @@ long _cdecl proc_thread_signal_sigblock(ulong mask)
     
     if (!t) return EINVAL;
         
-    ulong old_mask = THREAD_SIGMASK(t);
-
-    /* Remove unmaskable signals from mask being added */
-    if (mask & (UNMASKABLE | 1UL)) {
-        TRACE_THREAD("THREAD SIGNAL SIGBLOCK: attempt to block unmaskable signals");
-        mask &= ~(UNMASKABLE | 1UL);
-    }
-
     /* Merge assignment to add signals to mask, excluding unmaskable ones */
     THREAD_SIGMASK_ADD(t, mask);
-    
-    return old_mask;
+    if ( t->tid == 0) {
+        PROC_SIGMASK_ADD(t, mask);
+    }
+
+    return 0;
 }
 
 /*
@@ -1246,34 +1185,27 @@ long _cdecl proc_thread_signal_sigalrm(struct thread *t, long ms)
  */
 void dispatch_thread_signals(struct thread *t)
 {
-    int sig;
-    int signals_handled = 0;
+    unsigned long sig;
+    unsigned short signals_handled = 0;
 
-    if (!t || !t->proc || !t->proc->p_sigacts || !t->proc->p_sigacts->thread_signals || t->tid == 0 || t->is_idle)
-        return;
-
-    /* CRITICAL: Don't dispatch signals to threads that just started */
-    if (!t->cpu_time) {
-        TRACE_THREAD("dispatch_thread_signals: Thread %d too new (cpu_time=%lu, last_scheduled=%lu), deferring signal dispatch", 
-                     t->tid, t->cpu_time, t->last_scheduled);
+    if (!t || !t->proc || !t->proc->p_sigacts || !t->proc->p_sigacts->thread_signals || t->is_idle){
+        TRACE_THREAD("DISPATCH THREAD SIGNALS: ERROR - Invalid thread %d", t->tid);
         return;
     }
 
     /* Check if already handling a signal */
     if (t->t_sig_in_progress) {
-        TRACE_THREAD("dispatch_thread_signals: Thread %d already handling signal %d", 
-                     t->tid, t->t_sig_in_progress);
+        TRACE_THREAD("DISPATCH THREAD SIGNALS: WARNING - Thread %d already handling signal %d", t->tid, t->t_sig_in_progress);
         return;
     }
 
     /* Skip if blocked in sigwait - CRITICAL: But clear the flag! */
     if (t->wait_type & WAIT_SIGNAL) {
-        TRACE_THREAD("dispatch_thread_signals: Thread %d is in sigwait, clearing WAIT_SIGNAL flag", t->tid);
-        t->wait_type &= ~WAIT_SIGNAL; // Allow signal to be handled
-        // DON'T return - let the signal be processed
+        TRACE_THREAD("DISPATCH THREAD SIGNALS: INFO - Thread %d is in sigwait, clearing WAIT_SIGNAL flag", t->tid);
+        t->wait_type &= ~WAIT_SIGNAL; // Allow signal to be handled - DON'T return - let the signal be processed
     }
 
-    TRACE_THREAD("dispatch_thread_signals: Checking thread %d for pending signals (0x%lx, mask=0x%lx)", 
+    TRACE_THREAD("DISPATCH THREAD SIGNALS: INFO - Checking thread %d for pending signals (0x%lx, mask=0x%lx)", 
                  t->tid, t->t_sigpending, THREAD_SIGMASK(t));
 
     /* Handle ALL pending signals with safety limit
@@ -1282,24 +1214,23 @@ void dispatch_thread_signals(struct thread *t)
     while ((sig = check_thread_signals(t)) > 0 && signals_handled < NSIG) {
         /* Check if signal handler was set up */
         if (t->t_sig_in_progress) {
-            TRACE_THREAD("dispatch_thread_signals: Signal %d detected but signal %d already in progress", 
+            TRACE_THREAD("DISPATCH THREAD SIGNALS: WARNING - Signal %d detected but signal %d already in progress", 
                          sig, t->t_sig_in_progress);
             break;
         }
         
-        TRACE_THREAD("dispatch_thread_signals: Dispatching signal %d to thread %d", 
+        TRACE_THREAD("DISPATCH THREAD SIGNALS: INFO - Dispatching signal %ld to thread %d / Calling handle_thread_signal()", 
                      sig, t->tid);
         handle_thread_signal(t, sig);
         signals_handled++;
     }
     
     if (signals_handled >= NSIG) {
-        TRACE_THREAD("WARNING: dispatch_thread_signals hit iteration limit for thread %d", t->tid);
+        TRACE_THREAD("DISPATCH THREAD SIGNALS: ERROR - dispatch_thread_signals hit iteration limit for thread %d", t->tid);
     }
     
     if (signals_handled > 0) {
-        TRACE_THREAD("dispatch_thread_signals: Handled %d signal(s) for thread %d", 
-                     signals_handled, t->tid);
+        TRACE_THREAD("DISPATCH THREAD SIGNALS: INFO - Handled %d signal(s) for thread %d", signals_handled, t->tid);
     }
 }
 
@@ -1344,7 +1275,9 @@ long _cdecl proc_thread_signal_broadcast(int sig)
 long _cdecl proc_thread_sigreturn(void)
 {
     struct thread *t = CURTHREAD;
-    struct proc *p = curproc;
+    struct proc *p = t->proc;
+
+    CONTEXT *ctx = NULL;
     
     if (!t || !p) {
         TRACE_THREAD("SIGRETURN: Invalid thread or process");
@@ -1358,44 +1291,68 @@ long _cdecl proc_thread_sigreturn(void)
  
     TRACE_THREAD("SIGRETURN: Thread %d returning from signal %d handler", 
                  t->tid, t->t_sig_in_progress);
-
-    /* Clear the pending flag for the signal we just handled */
-    int handled_sig = t->t_sig_in_progress;
-    t->t_sigpending &= ~(1UL << handled_sig);
-
-    /* Clear signal in progress flag */
-    t->t_sig_in_progress = 0;
-    
-    /* Clean up signal stack */
-    if (t->sig_stack) {
-        kfree(t->sig_stack);
-        t->sig_stack = NULL;
-    }
     
     /* Restore signal mask AFTER clearing signal state */
     THREAD_SIGMASK_SET(t, t->old_sigmask);
+
+    ctx = &t->ctxt[SYSCALL];
 
     /* Restore the original context from before the signal */
     TRACE_THREAD("SIGRETURN: Restoring original context - PC=%lx, SSP=%lx, USP=%lx, SR=%x", 
                  t->saved_ctx.pc, t->saved_ctx.ssp, t->saved_ctx.usp, t->saved_ctx.sr);
     
-    memcpy(&t->ctxt[SYSCALL], &t->saved_ctx, sizeof(CONTEXT));
+    /* No more signals, return to restored context */
+    memcpy(ctx, &t->saved_ctx, sizeof(CONTEXT));
     
     /* Sync to process context */
     TRACE_THREAD("SYNC SYS: Mirroring syscall context for thread %d", t->tid);
-    memcpy(&t->proc->ctxt[SYSCALL], &t->ctxt[SYSCALL], sizeof(CONTEXT));
-    
-    /* No more signals, return to restored context */
-    CONTEXT *ctx = &t->ctxt[SYSCALL];
-    
-    /* Sanity check before context switch */
-    if (!ctx || ctx->pc == 0) {
-        TRACE_THREAD("SIGRETURN ERROR: Invalid context for thread %d!", t->tid);
-        return EFAULT;
+    memcpy(&t->proc->ctxt[SYSCALL], ctx, sizeof(CONTEXT));
+
+    /* Clear the pending flag for the signal we just handled */
+    unsigned long sig = t->t_sig_in_progress;
+
+    /* CRITICAL: If sig is 0, this sigreturn was called from the classic sendsig() path,
+    * not from thread_signal_trampoline(). In this case, the signal was already cleared
+    * by check_sigs() in signal.c, so we don't need to clear it again.
+    * Only clear thread-specific pending signals if t_sig_in_progress was set.
+    */
+    if (sig > 0 && sig < NSIG) {
+        t->t_sigpending &= ~(1UL << sig);
+        TRACE_THREAD("SIGRETURN: Cleared pending flag for signal %d, new pending 0x%lx", 
+                    sig, t->t_sigpending);
+    } else {
+        TRACE_THREAD("SIGRETURN: No t_sig_in_progress (sig=%lu), signal already cleared by check_sigs()", sig);
     }
-    
-    if ((ctx->sr & 0x2000) == 0) leave_kernel();
-    change_context(ctx);
+                
+    /* Clear signal in progress flag */
+    t->t_sig_in_progress = 0;
+
+    /* Clean up signal stack */
+    if (t->sig_stack) {
+        kfree(t->sig_stack);
+        t->sig_stack = NULL;
+    }
+
+    /* Check for more pending signals and dispatch them before rescheduling.
+    * This ensures ALL pending signals are handled before returning to 
+    * blocked state (e.g., pthread_join, sleep).
+    */
+    if (t->tid > 0 && t->t_sigpending && !(t->t_sigpending & THREAD_SIGMASK(t))) {
+        sig = check_thread_signals(t);
+        if (sig > 0) {
+            TRACE_THREAD("SIGRETURN: Thread %d has more pending signals, handling before reschedule", t->tid);
+            
+            /* Dispatch the next signal immediately */
+            handle_thread_signal(t, sig);
+            
+            /* This will recursively call sigreturn when that handler completes,
+            * ensuring all signals are processed before we reach proc_thread_schedule()
+            */
+            return 0;
+        }
+    }
+
+    proc_thread_schedule();
     
     /* Should never reach here */
     TRACE_THREAD("SIGRETURN ERROR: Returned from change_context!");
@@ -1569,3 +1526,47 @@ static void cleanup_thread_sigqueue(struct thread *t)
     
     spl(sr);
 }
+
+// void proc_thread_handle_proc_signal(void){
+
+//     struct proc *p = get_curproc();
+//     struct sigaction *sa;
+//     if (p->p_flag & P_FLAG_SIGWAIT){ 
+//         TRACE_THREAD("SCHED: Process %d is waiting for signal", p->pid);
+//         return;
+//     }
+//     TRACE_THREAD("SCHED: Checking for pending signals for process %d", p->pid);
+//     /* Check for fatal signals at process level before scheduling */
+//     if (p->sigpending) {
+//         int i;
+//         for (i = 1; i < NSIG; i++) {
+//             if (p->sigpending & (1UL << i)) {
+//                 sa = &SIGACTION(p, i);
+                
+//                 /* Only scheduler can terminate the process */
+//                 if (sa->sa_handler == SIG_DFL) {
+//                     /* Check if this is a fatal signal */
+//                     switch (i) {
+//                         case SIGKILL:
+//                         case SIGTERM:
+//                         case SIGABRT:
+//                         case SIGSEGV:
+//                         case SIGBUS:
+//                         case SIGILL:
+//                         case SIGFPE:
+//                         case SIGTRAP:
+//                             TRACE_THREAD("SCHED: Fatal signal %d with SIG_DFL, terminating process %d", 
+//                                          i, p->pid);
+//                             p->sigpending &= ~(1UL << i);
+//                             /* Call your existing process termination */
+//                             handle_sig(i);
+//                             /* Does not return */
+//                             break;
+//                     }
+//                 }
+//             }
+//         }
+//         TRACE_THREAD("SCHED: No fatal signals pending for process %d", p->pid);
+//     }
+
+// }

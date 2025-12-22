@@ -1,24 +1,25 @@
-/**
- * @file proc_threads.c
- * @brief Kernel Thread Management Core
- * 
- * Implements core thread operations including:
- *  - Thread creation and termination
- *  - Context initialization
- *  - Idle thread management
- *  - Process cleanup for multi-threaded processes
- *  - Thread status and ID retrieval
- * 
- * Handles the creation of the initial main thread (thread0)
- * and manages the thread lifecycle from creation to exit.
- * 
- * Author: Medour Mehdi
- * Date: June 2025
- * Version: 1.0
- */
+/******************************************************************************/
+/* proc_threads.c - Kernel Thread Management Core (m68k Optimized)           */
+/*                                                                            */
+/* Implements core thread operations including:                               */
+/*  - Thread creation and termination                                         */
+/*  - Context initialization                                                   */
+/*  - Idle thread management                                                  */
+/*  - Process cleanup for multi-threaded processes                            */
+/*  - Thread status and ID retrieval                                          */
+/*                                                                            */
+/* Optimization strategy:                                                     */
+/*  - Single mint_bzero per allocation, set only non-zero fields             */
+/*  - Minimize interrupt-disabled sections (splhigh/spl pairs)                */
+/*  - Reduce redundant memory operations                                      */
+/*  - Keep code paths straightforward for better branch prediction            */
+/*                                                                            */
+/* Author: Medour Mehdi                                                       */
+/* Optimized for: Motorola 68000 architecture                                 */
+/* Date: December 2025                                                        */
+/******************************************************************************/
 
 #include "proc_threads.h"
-
 #include "proc_threads_helper.h"
 #include "proc_threads_queue.h"
 #include "proc_threads_scheduler.h"
@@ -37,6 +38,7 @@ typedef struct {
     int priority;
 } pthread_attr_t;
 
+/* Forward declarations */
 static void proc_thread_start(void);
 static long create_thread(struct proc *p, void *(*func)(void*), void *arg, void *stack_ptr);
 static void init_main_thread_context(struct proc *p);
@@ -44,8 +46,12 @@ static void init_thread_context(struct thread *t, void *(*func)(void*), void *ar
 static struct thread* create_idle_thread(struct proc *p);
 static void *idle_thread_func(void *arg);
 
-static void kernel_pthread_syscall(unsigned long subsystem, unsigned long op, unsigned long arg1, unsigned long arg2) {
-    asm volatile (
+/******************************************************************************/
+/* kernel_pthread_syscall - Issue pthread system call from kernel mode       */
+/******************************************************************************/
+static void kernel_pthread_syscall(unsigned long subsystem, unsigned long op, 
+                                   unsigned long arg1, unsigned long arg2) {
+    __asm__ volatile (
         "movl   %3, %%sp@-\n\t"         /* Push arg2 */
         "movl   %2, %%sp@-\n\t"         /* Push arg1 */
         "movl   %1, %%sp@-\n\t"         /* Push operation */
@@ -59,17 +65,27 @@ static void kernel_pthread_syscall(unsigned long subsystem, unsigned long op, un
     );
 }
 
+/******************************************************************************/
+/* proc_thread_start - Thread entry trampoline                                */
+/* Executed when a new thread first runs. Calls user function and exits.     */
+/******************************************************************************/
 static void proc_thread_start(void) {
     struct thread *t;
     struct proc *p;
+    void *(*func)(void*);
+    void *arg;
+    void *result = NULL;
 
     p = curproc;
     t = p ? p->current_thread : NULL;
     
-    TRACE_THREAD("START: Thread trampoline started, thread pointer %p, tid %d", t, t ? t->tid : -1);
+    TRACE_THREAD("START: Thread trampoline started, thread=%p, tid=%d", 
+                 t, t ? t->tid : -1);
     
+    /* Validate thread and process */
     if (!t || t->magic != CTXT_MAGIC) {
-        TRACE_THREAD("START: Invalid thread pointer %p or magic %lx", t, t ? t->magic : 0);
+        TRACE_THREAD("START: Invalid thread pointer %p or magic %lx", 
+                     t, t ? t->magic : 0);
         return;
     }
     
@@ -80,212 +96,191 @@ static void proc_thread_start(void) {
     
     TRACE_THREAD("START: Current thread is %d", t->tid);
     
-    // CRITICAL: Initialize last_scheduled when thread first starts
-    TRACE_THREAD("START: Initialized last_scheduled=%lu for thread %d", t->last_scheduled, t->tid);
-    
-    // Start preemption timer if needed
+    /* Start preemption timer if needed (multi-threaded process) */
     if (p->num_threads > 1 && !p->p_thread_timer.enabled) {
-        TRACE_THREAD("START: Starting thread timer for process %d (thread %d)", p->pid, t->tid);
+        TRACE_THREAD("START: Starting thread timer for process %d (thread %d)", 
+                     p->pid, t->tid);
         thread_timer_start(p, t->tid);
     }
    
-    void* (*func)(void*) = t->func;
-    void *arg = t->arg;
-    void *result = NULL;
+    /* Extract function and argument (cached in registers on m68k) */
+    func = t->func;
+    arg = t->arg;
 
     TRACE_THREAD("START: Thread function=%p, arg=%p", func, arg);
     
-    // Call the function
+    /* Call the thread function (user mode execution) */
     if (func) {
         TRACE_THREAD("START: Calling thread function");
-        result = func(arg);  // Capture return value in user mode
+        t->has_run = 1;
+        
+        result = func(arg);
         TRACE_THREAD("START: Thread function returned");
     }
 
+    /* Exit thread with result */
     if (t && t->magic == CTXT_MAGIC) {
-        TRACE_THREAD("START: Thread %d finished execution, returning result %p", t->tid, result);
-        kernel_pthread_syscall(P_THREAD_CTRL, THREAD_CTRL_EXIT, (unsigned long)result, 0);
-        // proc_thread_exit(result, NULL); // Should never return -> Privilege violation
+        TRACE_THREAD("START: Thread %d finished execution, result=%p", 
+                     t->tid, result);
+        kernel_pthread_syscall(P_THREAD_CTRL, THREAD_CTRL_EXIT, 
+                              (unsigned long)result, 0);
     }
-    return;
 }
 
-// Thread creation syscall
+/******************************************************************************/
+/* proc_thread_create - Thread creation syscall entry point                  */
+/******************************************************************************/
 long _cdecl proc_thread_create(void *(*func)(void*), void *arg, void *attr) {    
     TRACE_THREAD("CREATETHREAD: func=%p arg=%p attr=%p", func, arg, attr);
 
+    /* Ensure main thread exists */
     init_main_thread_context(curproc);
+    
     return create_thread(curproc, func, arg, attr);
 }
 
-static long create_thread(struct proc *p, void *(*func)(void*), void *arg, void* attr_ptr) {
+/******************************************************************************/
+/* create_thread - Internal thread creation implementation                    */
+/* Creates a new user thread with optional attributes                         */
+/******************************************************************************/
+static long create_thread(struct proc *p, void *(*func)(void*), void *arg, 
+                         void *attr_ptr) {
     register unsigned short sr;
-    size_t stack_size = STKSIZE;  // Default stack size
+    pthread_attr_t *attr = (pthread_attr_t *)attr_ptr;
+    struct thread *t;
+    size_t stack_size = STKSIZE;
     short is_detached = 0;
     short sched_policy = DEFAULT_SCHED_POLICY;
-    short thread_priority = -1;  // -1 means use default priority calculation
+    short thread_priority = -1;
+    int calc_priority;
 
-    pthread_attr_t *attr = (pthread_attr_t *)attr_ptr;
-
-    unsigned short i;
-
-    // Extract attributes if provided
+    /* Extract attributes if provided */
     if (attr) {
         if (attr->stacksize > 0) {
             stack_size = attr->stacksize;
         }
         is_detached = (attr->detachstate == PTHREAD_CREATE_DETACHED);
         
-        // Handle scheduling policy
         if (attr->policy > 0) {
             sched_policy = attr->policy;
         }
         
-        // Handle priority (validate range) - fix negative priority issue
+        /* Validate and clamp priority */
         if (attr->priority >= 0) {
-            // Clamp priority to valid range
             thread_priority = MIN(MAX(attr->priority, 1), MAX_THREAD_PRIORITY);
         }
     }
     
-    // Allocate thread structure
-    sr = splhigh();  // Disable interrupts before allocation to prevent race conditions
-    
-    // Check if process is valid
+    /* Validate process - do this BEFORE disabling interrupts */
     if (!p || p->magic != CTXT_MAGIC) {
-        spl(sr);
         return EINVAL;
     }
     
-    struct thread *t = kmalloc(sizeof(struct thread));
+    /* === CRITICAL SECTION START === */
+    sr = splhigh();
+    
+    /* Allocate thread structure */
+    t = kmalloc(sizeof(struct thread));
     if (!t) {
         spl(sr);
         return ENOMEM;
     }
-    TRACE_THREAD("KMALLOC: Allocated thread structure at %p", t);
-    TRACE_THREAD("Creating thread: pid=%d, func=%p, arg=%p, stack_size=%lu, policy=%d, priority=%d", 
-                 p->pid, func, arg, stack_size, sched_policy, 
-                 (thread_priority > 0) ? thread_priority : t->priority);
     
-    // Basic initialization
-    mint_bzero (t, sizeof(*t));
-
+    TRACE_THREAD("KMALLOC: Allocated thread structure at %p", t);
+    TRACE_THREAD("Creating thread: pid=%d, func=%p, arg=%p, stack_size=%lu, "
+                 "policy=%d, priority=%d", 
+                 p->pid, func, arg, stack_size, sched_policy, thread_priority);
+    
+    /* Zero entire structure ONCE - this is efficient on m68k */
+    mint_bzero(t, sizeof(*t));
+    
+    /* Allocate stack */
+    t->stack = kmalloc(stack_size);
+    if (!t->stack) {
+        kfree(t);
+        spl(sr);
+        TRACE_THREAD("KFREE: Stack allocation failed");
+        return ENOMEM;
+    }
+    
+    TRACE_THREAD("KMALLOC: Allocated stack at %p for thread (size %zu)", 
+                 t->stack, stack_size);
+    
+    /* === Set ONLY non-zero fields (optimization) === */
+    
+    /* Thread identity */
     t->tid = p->total_threads++;
-    p->num_threads++;
-    // Link into process
     t->proc = p;
-    t->name[0] = '\0'; // Initialize to empty string
-    t->is_idle = 0;  // Not an idle thread
-
-    /* Set thread priority - use attribute if specified, otherwise inherit from process */
+    t->magic = CTXT_MAGIC;
+    
+    /* Stack setup */
+    t->stack_top = (char*)t->stack + stack_size;
+    t->stack_size = stack_size;
+    t->stack_magic = STACK_MAGIC;
+    
+    /* Priority calculation */
     if (thread_priority > 0) {
         t->priority = scale_thread_priority(thread_priority);
         t->original_priority = scale_thread_priority(thread_priority);
-        TRACE_THREAD("Using attribute priority %d for thread %d", thread_priority, t->tid);
+        TRACE_THREAD("Using attribute priority %d for thread %d", 
+                     thread_priority, t->tid);
     } else {
-        /* Map process priority to thread priority (keep positive values) */
-        int proc_priority = (p->pri < 0) ? -p->pri : p->pri;
-        t->priority = MAX(scale_thread_priority(proc_priority), 1);
+        calc_priority = (p->pri < 0) ? -p->pri : p->pri;
+        t->priority = MAX(scale_thread_priority(calc_priority), 1);
         t->original_priority = t->priority;
     }
     
+    /* Scheduling parameters */
     t->policy = sched_policy;
-    t->timeslice = t->proc->thread_default_timeslice;
-    t->remaining_timeslice = t->proc->thread_default_timeslice;
-    t->last_scheduled = 0;
-
-    // t->priority_boost = (t->tid > 0) ? 1 : 0;
-    t->priority_boost = 0;
-
-    /* Initialize thread-specific data */
-    t->tsd_data = NULL;
-
-    /* Initialize signal fields */
-    t->t_sigpending = 0;
-
-    /* Inherit signal mask from current thread for POSIX compliance */
+    t->timeslice = p->thread_default_timeslice;
+    t->remaining_timeslice = p->thread_default_timeslice;
+    
+    /* Signal mask inheritance - inherit from current thread for POSIX compliance */
     if (p->current_thread && p->current_thread->magic == CTXT_MAGIC) {
         THREAD_SIGMASK_SET(t, THREAD_SIGMASK(p->current_thread));
     } else {
         THREAD_SIGMASK_SET(t, p->p_sigmask);
-    }    
-
-    t->t_sig_in_progress = 0;
-    t->alarm_timeout = NULL;
-    t->sig_stack = NULL;
-    t->old_sigmask = 0;
-    for (i = 0; i < NSIG; i++) {
-        t->sig_handlers[i].handler = NULL;
-        t->sig_handlers[i].arg = NULL;
     }
-
-    t->stack = kmalloc(stack_size);
-    if (!t->stack) {
-        p->num_threads--;  // Revert the thread count increment
-        TRACE_THREAD("KFREE: Stack allocation failed");
-        t->magic = 0;      // Clear magic before freeing
-        kfree(t);
-        spl(sr);
-        return ENOMEM;
-    }
-    TRACE_THREAD("KMALLOC: Allocated stack at %p for thread %d (size %zu)", 
-                 t->stack, t->tid, stack_size);
     
-    t->stack_top = (char*)t->stack + stack_size;  // Use actual stack size
-    t->stack_size = stack_size;  // Store stack size in thread structure
-    t->stack_magic = STACK_MAGIC;
-    t->magic = CTXT_MAGIC;
+    /* Join/detach state */
+    t->detached = is_detached;
     
-    t->wakeup_time = 0;  // No wakeup time initially
-    t->next_sleeping = NULL;  // Not in sleep queue initially
-    t->next_ready = NULL;  // Not in ready queue initially
-    // Link into process thread list
-    t->next = p->threads;
-    p->threads = t;
-
-	t->mutex_wait_obj = NULL;
-	t->sem_wait_obj = NULL;
-	t->sig_wait_obj = NULL;
-	t->cond_wait_obj = NULL;
-	t->join_wait_obj = NULL;
-    t->wait_type = WAIT_NONE;  // Not waiting for anything initially
-    t->sleep_reason = 0;  // No sleep reason initially
-    
-    // Initialize join-related fields
-    t->retval = NULL;
-    t->joiner = NULL;
-    t->detached = is_detached;  // Set detached state from attributes
-    t->joined = 0;
-
+    /* Cancellation state (enabled by default for user threads) */
     t->cancel_state = PTHREAD_CANCEL_ENABLE;
     t->cancel_type = PTHREAD_CANCEL_DEFERRED;
-    t->cancel_pending = 0;
     
-    t->errno_ptr = NULL;  // Initialize errno pointer to NULL
-    t->cleanup_stack = NULL; // No cleanup handlers initially
-    t->tsd_data = NULL; // Start with NULL TSD data
-
-    t->t_sigqueue_head = NULL;
-    t->t_sigqueue_tail = NULL;
-    t->t_sigqueue_count = 0;    
-
-        TRACE_THREAD("Thread %d stack: base=%p, top=%p, size=%zu", 
+    /* Link into process thread list (at head for O(1) insertion) */
+    t->next = p->threads;
+    p->threads = t;
+    p->num_threads++;
+    
+    TRACE_THREAD("Thread %d stack: base=%p, top=%p, size=%zu", 
                  t->tid, t->stack, t->stack_top, stack_size);
     
+    /* Initialize thread subsystems */
     init_thread_cleanup(t);
     init_thread_tsd(t);
-
-    // Initialize context
+    
+    /* Initialize context (sets up registers and stack) */
     init_thread_context(t, func, arg);
     
-    atomic_thread_state_change(t, (THREAD_STATE_READY ));
+    /* Make thread ready to run */
+    atomic_thread_state_change(t, THREAD_STATE_READY);
 
-    if(!p->p_thread_timer.enabled){
-        thread_timer_start(t->proc, t->tid);
+    if (!(p->p_flag & P_FLAG_THREADED)) {
+        p->p_flag |= P_FLAG_THREADED;
+        TRACE_THREAD("CREATETHREAD: Marked process %d as threaded", p->pid);
     }
 
+    /* Start thread timer if not already running */
+    if (!p->p_thread_timer.enabled) {
+        thread_timer_start(p, t->tid);
+    }
+    
+    /* Add to ready queue (scheduler will pick it up) */
     add_to_ready_queue(t);
-
+    
+    /* === CRITICAL SECTION END === */
     spl(sr);
 
     TRACE_THREAD_CREATE(t, t->func, t->arg);
@@ -293,238 +288,263 @@ static long create_thread(struct proc *p, void *(*func)(void*), void *arg, void*
     return t->tid;
 }
 
-static void init_thread_context(struct thread *t, void *(*func)(void*), void *arg) {
+/******************************************************************************/
+/* init_thread_context - Initialize thread execution context                 */
+/* Sets up stack and registers for first-time thread execution               */
+/******************************************************************************/
+static void init_thread_context(struct thread *t, void *(*func)(void*), 
+                               void *arg) {
+    unsigned long usp, ssp;
+    
     TRACE_THREAD("INIT CONTEXT: Initializing context for thread %d", t->tid);
     
-    // Clear context completely
+    /* Clear contexts completely */
     mint_bzero(&t->ctxt[CURRENT], sizeof(t->ctxt[CURRENT]));
     mint_bzero(&t->ctxt[SYSCALL], sizeof(t->ctxt[SYSCALL]));
     
-    // Store function and argument in thread structure
+    /* Store function and argument in thread structure */
     t->func = func;
     t->arg = arg;
     
-    memcpy(&t->ctxt[CURRENT], &t->proc->ctxt[CURRENT], sizeof(struct context));
-    memcpy(&t->ctxt[SYSCALL], &t->proc->ctxt[SYSCALL], sizeof(struct context));
+    /* Copy process context as template */
+    memcpy(&t->ctxt[CURRENT], &t->proc->ctxt[CURRENT], sizeof(CONTEXT));
+    memcpy(&t->ctxt[SYSCALL], &t->proc->ctxt[SYSCALL], sizeof(CONTEXT));
 
-    // Set up stack pointers - use same USP for both contexts
-    unsigned long usp = ((unsigned long)t->stack_top - 512) & ~0x3;
-    unsigned long ssp = ((unsigned long)t->stack_top - 1024) & ~0x3; 
+    /* Set up stack pointers (aligned to 4-byte boundary for m68k) */
+    usp = ((unsigned long)t->stack_top - 512) & ~0x3UL;
+    ssp = ((unsigned long)t->stack_top - 1024) & ~0x3UL;
     
-    // Set up initial context
+    /* Initialize CURRENT context (what thread will run with) */
     t->ctxt[CURRENT].ssp = ssp;
     t->ctxt[CURRENT].usp = usp;
-
     t->ctxt[CURRENT].pc = (unsigned long)proc_thread_start;
-    t->ctxt[CURRENT].sr = 0x0000;
-    // *((long *)(t->ctxt[CURRENT].usp + 4)) = (long) arg;
+    t->ctxt[CURRENT].sr = 0x0000;  /* User mode, interrupts enabled */
     
+    /* Initialize SYSCALL context (saved during system calls) */
     t->ctxt[SYSCALL].ssp = ssp;
     t->ctxt[SYSCALL].usp = usp;
     t->ctxt[SYSCALL].pc = (unsigned long)proc_thread_start;
-    t->ctxt[SYSCALL].sr  = 0x0000;
-    // *((long *)(t->ctxt[SYSCALL].usp + 4)) = (long) arg;
+    t->ctxt[SYSCALL].sr = 0x0000;
 
+    /* Initialize scheduling timestamp */
     t->last_scheduled = get_system_ticks();
 
     TRACE_THREAD("INIT CONTEXT: Thread %d initialized for USER MODE", t->tid);
-    TRACE_THREAD(" CURRENT CONTEXT: SSP = %lx, USP = %lx, PC = %lx, SR = %04x", 
+    TRACE_THREAD(" CURRENT: SSP=%lx, USP=%lx, PC=%lx, SR=%04x", 
                 t->ctxt[CURRENT].ssp, t->ctxt[CURRENT].usp, 
                 t->ctxt[CURRENT].pc, t->ctxt[CURRENT].sr);
-    TRACE_THREAD(" SYSCALL CONTEXT: SSP = %lx, USP = %lx, PC = %lx, SR = %04x", 
+    TRACE_THREAD(" SYSCALL: SSP=%lx, USP=%lx, PC=%lx, SR=%04x", 
                 t->ctxt[SYSCALL].ssp, t->ctxt[SYSCALL].usp, 
-                t->ctxt[SYSCALL].pc, t->ctxt[SYSCALL].sr);                
+                t->ctxt[SYSCALL].pc, t->ctxt[SYSCALL].sr);
 }
 
+/******************************************************************************/
+/* init_main_thread_context - Initialize thread0 (main thread) for process   */
+/* Called once per process to create the initial execution context           */
+/******************************************************************************/
 static void init_main_thread_context(struct proc *p) {
-    if (p->current_thread) return; // Already initialized
+    struct thread *t0;
     
-    struct thread *t0 = kmalloc(sizeof(struct thread));
-    unsigned short i;
-
-    if (!t0) return;
-    TRACE_THREAD("KMALLOC: Allocated thread0 structure at %p for process %d", t0, p->pid);
+    /* Idempotent - return if already initialized */
+    if (p->current_thread) {
+        return;
+    }
+    
+    /* Allocate thread0 structure */
+    t0 = kmalloc(sizeof(struct thread));
+    if (!t0) {
+        return;
+    }
+    
+    TRACE_THREAD("KMALLOC: Allocated thread0 structure at %p for process %d", 
+                 t0, p->pid);
     TRACE_THREAD("INIT CONTEXT: Initializing thread0 for process %d", p->pid);
     
-    mint_bzero (t0, sizeof(*t0));
-    t0->tid = 0;
+    /* Zero entire structure ONCE */
+    mint_bzero(t0, sizeof(*t0));
+    
+    /* === Set ONLY non-zero fields === */
+    
+    /* Thread0 identity (tid=0 is main thread) */
     t0->proc = p;
+    t0->magic = CTXT_MAGIC;
     strncpy(t0->name, p->name, 15);
-    t0->name[15] = '\0'; // Ensure null termination
-    t0->priority = MAX(scale_thread_priority(-p->pri), 1);  // Use minimum thread priority
-    t0->original_priority = t0->priority;
-
-    t0->policy = DEFAULT_SCHED_POLICY;
-    t0->timeslice = p->thread_default_timeslice;
-    t0->remaining_timeslice = p->thread_default_timeslice;
-
-    // Use process stack for thread0
+    t0->name[15] = '\0';
+    
+    /* Thread0 uses process stack (no separate allocation) */
     t0->stack = p->stack;
     t0->stack_top = (char*)p->stack + STKSIZE;
-    t0->stack_magic = STACK_MAGIC;
-    t0->is_idle = 0;  // Not an idle thread
     t0->stack_size = STKSIZE;
-
-    // Initialize thread0 context from process context
+    t0->stack_magic = STACK_MAGIC;
+    
+    /* Priority setup */
+    t0->priority = MAX(scale_thread_priority(-p->pri), 1);
+    t0->original_priority = t0->priority;
+    t0->policy = DEFAULT_SCHED_POLICY;
+    
+    /* Scheduling timeslice */
+    t0->timeslice = p->thread_default_timeslice;
+    t0->remaining_timeslice = p->thread_default_timeslice;
+    
+    /* Initialize thread0 context from process context */
     memcpy(&t0->ctxt[CURRENT], &p->ctxt[CURRENT], sizeof(CONTEXT));
     memcpy(&t0->ctxt[SYSCALL], &p->ctxt[SYSCALL], sizeof(CONTEXT));
-
-    // Ensure thread0 uses its own context, not process context directly
-    t0->ctxt[CURRENT].regs[0] = 0;
-    t0->ctxt[SYSCALL].regs[0] = 0;
-
-    // Link into process
-    t0->next = NULL;
-
-    t0->magic = CTXT_MAGIC;
-
-    for (i = 0; i < NSIG; i++) {
-        t0->sig_handlers[i].handler = NULL;
-        t0->sig_handlers[i].arg = NULL;
-    }
-	t0->mutex_wait_obj = NULL;
-	t0->sem_wait_obj = NULL;
-	t0->sig_wait_obj = NULL;
-	t0->cond_wait_obj = NULL;
-	t0->join_wait_obj = NULL;
-    t0->wait_type = WAIT_NONE;  // Not waiting for anything initially
-    t0->sleep_reason = 0;  // No sleep reason initially
     
-    t0->last_scheduled = 0;
-
-    // Initialize join-related fields
-    t0->retval = NULL;
-    t0->joiner = NULL;
-    t0->detached = 0;  // Default is joinable
-    t0->joined = 0;
-
-    // For thread0 (main thread - special semantics):
-    t0->cancel_state = PTHREAD_CANCEL_DISABLE;  // Protect main thread
-    t0->cancel_type = PTHREAD_CANCEL_DEFERRED;
-    t0->cancel_pending = 0;
-
-    t0->errno_ptr = NULL;  // Initialize errno pointer to NULL
-
-    t0->cleanup_stack = NULL; // No cleanup handlers
-
-    /* Thread0 uses process TSD data */
+    /* Thread0 uses process TSD data (shared) */
     t0->tsd_data = p->proc_tsd_data;
-
-    t0->t_sigqueue_head = NULL;
-    t0->t_sigqueue_tail = NULL;
-    t0->t_sigqueue_count = 0;
-
+    
+    /* Main thread is NOT cancellable (protect process main) */
+    t0->cancel_state = PTHREAD_CANCEL_DISABLE;
+    t0->cancel_type = PTHREAD_CANCEL_DEFERRED;
+    
+    t0->has_run = 1;
+    /* Link into process (thread0 is the only thread initially) */
     p->threads = t0;
     p->current_thread = t0;
     p->num_threads = 1;
     p->total_threads = 1;
-
-    /* Initialize thread signal handling - ENABLED by default for POSIX compliance */
+    
+    /* Enable threaded signal handling for process */
     p->p_sigacts->thread_signals = 1;
-    p->p_sigacts->flags |= SAS_THREADED;  /* Also enable threaded flag */    
+    p->p_sigacts->flags |= SAS_THREADED;
+    
+    /* Set thread0 signal mask */
+    THREAD_SIGMASK_SET(t0, p->p_sigmask);
 
+    /* Mark thread as running */
     atomic_thread_state_change(t0, THREAD_STATE_RUNNING);
-    TRACE_THREAD("INIT CONTEXT: Thread id. %d initialized for process %d, CURRENT -> ssp %lx, usp %lx, pc %lx",t0->tid, p->pid, t0->ctxt[CURRENT].ssp, t0->ctxt[CURRENT].usp, t0->ctxt[CURRENT].pc);
-    TRACE_THREAD("INIT CONTEXT: Thread id. %d initialized for process %d, SYSCALL -> ssp %lx, usp %lx, pc %lx",t0->tid, p->pid, t0->ctxt[SYSCALL].ssp, t0->ctxt[SYSCALL].usp, t0->ctxt[SYSCALL].pc);    
+    
+    TRACE_THREAD("INIT CONTEXT: Thread0 initialized for process %d", p->pid);
+    TRACE_THREAD(" CURRENT: ssp=%lx, usp=%lx, pc=%lx", 
+                 t0->ctxt[CURRENT].ssp, t0->ctxt[CURRENT].usp, 
+                 t0->ctxt[CURRENT].pc);
+    TRACE_THREAD(" SYSCALL: ssp=%lx, usp=%lx, pc=%lx", 
+                 t0->ctxt[SYSCALL].ssp, t0->ctxt[SYSCALL].usp, 
+                 t0->ctxt[SYSCALL].pc);
+    
+    /* Start thread timer for scheduling */
     TRACE_THREAD("INIT CONTEXT: Starting thread timer for process %d", p->pid);
     thread_timer_start(t0->proc, t0->tid);
 }
 
+/******************************************************************************/
+/* get_thread_context - Return appropriate context for thread                */
+/* Returns signal context if handling signal, otherwise syscall context      */
+/******************************************************************************/
 CONTEXT* get_thread_context(struct thread *t) {
+    /* Validate thread */
     if (!t || t->magic != CTXT_MAGIC || (t->state & THREAD_STATE_EXITED)) {
         TRACE_THREAD("GET_CTX ERROR: Invalid thread reference");
         return NULL;
     }
 
-    // If thread is handling a signal, return the signal context
+    /* If handling signal, return signal context */
     if (t->t_sig_in_progress) {
         TRACE_THREAD("GET_CTX: Using signal context for thread %d", t->tid);
         return &t->sig_ctx;
     }
 
-    TRACE_THREAD("GET_CTX: CURRENT context for thread %d, SR %x, PC %lx, SSP %lx, USP %lx", t->tid, t->ctxt[CURRENT].sr, t->ctxt[CURRENT].pc, t->ctxt[CURRENT].ssp, t->ctxt[CURRENT].usp);
-    TRACE_THREAD("GET_CTX: SYSCALL context for thread %d, SR %x, PC %lx, SSP %lx, USP %lx", t->tid, t->ctxt[SYSCALL].sr, t->ctxt[SYSCALL].pc, t->ctxt[SYSCALL].ssp, t->ctxt[SYSCALL].usp);
+    TRACE_THREAD("GET_CTX: CURRENT context for thread %d, SR=%x, PC=%lx, "
+                 "SSP=%lx, USP=%lx", 
+                 t->tid, t->ctxt[CURRENT].sr, t->ctxt[CURRENT].pc, 
+                 t->ctxt[CURRENT].ssp, t->ctxt[CURRENT].usp);
+    TRACE_THREAD("GET_CTX: SYSCALL context for thread %d, SR=%x, PC=%lx, "
+                 "SSP=%lx, USP=%lx", 
+                 t->tid, t->ctxt[SYSCALL].sr, t->ctxt[SYSCALL].pc, 
+                 t->ctxt[SYSCALL].ssp, t->ctxt[SYSCALL].usp);
     
+    /* Return syscall context (standard case) */
     return &t->ctxt[SYSCALL];
 }
 
+/******************************************************************************/
+/* proc_thread_cleanup_process - Clean up all threads when process exits     */
+/* Ensures proper cleanup order to avoid race conditions                     */
+/******************************************************************************/
 void proc_thread_cleanup_process(struct proc *pcurproc) {
-    /* Clean up threads if any exist */
-    if (pcurproc->threads) {
-        TRACE(("terminate: cleaning up threads for pid=%d", pcurproc->pid));
+    struct thread *t, *next;
+    TIMEOUT *timelist, *next_timelist;
+    
+    if (!pcurproc->threads) return;
+    
+    TRACE(("terminate: cleaning up threads for pid=%d", pcurproc->pid));
 
-        /* 1. FIRST: Stop the thread timer to prevent scheduling during cleanup */
-        if (pcurproc->p_thread_timer.enabled) {
-            TRACE(("terminate: stopping thread timer"));
-            thread_timer_stop(pcurproc);
-        }
+    /* Step 1: Stop thread timer FIRST to prevent scheduling during cleanup */
+    if (pcurproc->p_thread_timer.enabled) {
+        TRACE(("terminate: stopping thread timer"));
+        thread_timer_stop(pcurproc);
+    }
 
-        /* 2. Cancel all timeouts for this process EARLY */
-        TIMEOUT *timelist, *next_timelist;
-        for (timelist = tlist; timelist; timelist = next_timelist) {
-            next_timelist = timelist->next;
-            if (timelist->proc == pcurproc) {
-                TRACE(("terminate: cancelling timeout for pid=%d", pcurproc->pid));
-                canceltimeout(timelist);
-            }
+    /* Step 2: Cancel all timeouts for this process */
+    for (timelist = tlist; timelist; timelist = next_timelist) {
+        next_timelist = timelist->next;
+        if (timelist->proc == pcurproc) {
+            TRACE(("terminate: cancelling timeout for pid=%d", pcurproc->pid));
+            canceltimeout(timelist);
         }
+    }
 
-        /* 3. Remove all threads from queues BEFORE clearing sync states */
-        struct thread *t;
-        for (t = pcurproc->threads; t; t = t->next) {
-            if (t->magic == CTXT_MAGIC) {
-                TRACE(("terminate: removing thread %d from queues", t->tid));
-                remove_thread_from_wait_queues(t);
-                remove_from_ready_queue(t);
-                /* Mark as exited but don't free yet */
-                t->state |= THREAD_STATE_EXITED;
-            }
+    /* Step 3: Remove all threads from queues BEFORE clearing sync states */
+    for (t = pcurproc->threads; t; t = t->next) {
+        if (t->magic == CTXT_MAGIC) {
+            TRACE(("terminate: removing thread %d from queues", t->tid));
+            remove_thread_from_wait_queues(t);
+            remove_from_ready_queue(t);
+            /* Mark as exited but don't free yet */
+            t->state |= THREAD_STATE_EXITED;
         }
-        // Explicitly clean up idle thread
-        if (pcurproc->idle_thread) {
-            TRACE(("terminate: cleaning up idle thread"));
-            cleanup_thread_resources(pcurproc, pcurproc->idle_thread, pcurproc->idle_thread->tid);
-            pcurproc->idle_thread = NULL;
+    }
+    
+    /* Step 4: Clean up idle thread explicitly */
+    if (pcurproc->idle_thread) {
+        TRACE(("terminate: cleaning up idle thread"));
+        cleanup_thread_resources(pcurproc, pcurproc->idle_thread, 
+                                pcurproc->idle_thread->tid);
+        pcurproc->idle_thread = NULL;
+    }
+    
+    /* Step 5: Clean up sync states (mutexes, semaphores, etc.) */
+    cleanup_thread_sync_states(pcurproc);
+
+    /* Step 6: Free individual thread resources */
+    t = pcurproc->threads;
+    while (t) {
+        next = t->next;
+        
+        if (t->magic == CTXT_MAGIC) {
+            TRACE(("terminate: freeing thread %d resources", t->tid));
+            cleanup_thread_resources(pcurproc, t, t->tid);
         }
         
-        /* 4. NOW clean up sync states (threads are out of queues) */
-        cleanup_thread_sync_states(pcurproc);
-
-        /* 5. Free individual threads */
-        t = pcurproc->threads;
-        struct thread *next;
-        while (t) {
-            next = t->next;
-            
-            if (t->magic == CTXT_MAGIC) {
-                TRACE(("terminate: freeing thread %d resources", t->tid));
-                /* Free thread resources (includes individual TSD) */
-                cleanup_thread_resources(pcurproc, t, t->tid);
-            }
-            t = next;
-        }
-
-        /* 6. Clean up process-wide thread state */
-        pcurproc->current_thread = NULL;
-        pcurproc->num_threads = 0;
-        pcurproc->total_threads = 0;
-        pcurproc->threads = NULL;
-
-        /* 7. LAST: Clean up process-wide TSD */
-        cleanup_proc_tsd(pcurproc);
+        t = next;
     }
+
+    /* Step 7: Clean up process-wide thread state */
+    pcurproc->current_thread = NULL;
+    pcurproc->num_threads = 0;
+    pcurproc->total_threads = 0;
+    pcurproc->threads = NULL;
+
+    /* Step 8: Clean up process-wide TSD (last step) */
+    cleanup_proc_tsd(pcurproc);
 }
 
+/******************************************************************************/
+/* proc_thread_status - Get current status of a thread                       */
+/******************************************************************************/
 long proc_thread_status(long tid) {
     struct proc *p = curproc;
     struct thread *target = NULL;
     register unsigned short sr;
+    long status;
     
-    if (!p)
+    if (!p) {
         return EINVAL;
+    }
     
-    // Find target thread
+    /* Find target thread - protect with splhigh */
     sr = splhigh();
+    
     for (target = p->threads; target; target = target->next) {
         if (target->tid == tid) {
             break;
@@ -534,18 +554,20 @@ long proc_thread_status(long tid) {
     if (!target) {
         spl(sr);
         TRACE_THREAD("STATUS: No such thread %d", tid);
-        return ESRCH;  // Thread not found
+        return ESRCH;  /* Thread not found */
     }
     
-    long status = target->state;
+    status = target->state;
+    
     spl(sr);
     
     return status;
 }
 
-/*
- * Idle thread function - just loops forever
- */
+/******************************************************************************/
+/* idle_thread_func - Idle thread main loop                                  */
+/* Runs when no other threads are ready                                      */
+/******************************************************************************/
 static void *idle_thread_func(void *arg) {
     struct proc *p = (struct proc *)arg;
     
@@ -553,134 +575,124 @@ static void *idle_thread_func(void *arg) {
         TRACE_THREAD("IDLE: Invalid process pointer");
         return NULL;
     }
+    
+    /* Lower process priority for idle thread */
     p->pri = p->pri + 1;
 
+    /* Idle loop - yield CPU repeatedly */
     while (1) {
-        // TRACE_THREAD("IDLE: Idle thread %d running", p->idle_thread->tid);
         kernel_pthread_syscall(P_THREAD_SYNC, THREAD_SYNC_YIELD, 0, 0);
     }
 
-    /* Restore original process priority */
+    /* Restore original process priority (never reached) */
     p->pri = p->pri - 1;
 
     return NULL;
 }
 
+/******************************************************************************/
+/* create_idle_thread - Create idle thread for process                       */
+/* Idle thread runs at lowest priority when no other threads are ready       */
+/******************************************************************************/
 static struct thread* create_idle_thread(struct proc *p) {
-    // Create a new idle thread
-    struct thread *idle = kmalloc(sizeof(struct thread));
-    unsigned short i;
-    if (!idle) return NULL;
+    struct thread *idle;
     
-    // Initialize the idle thread
+    /* Allocate idle thread structure */
+    idle = kmalloc(sizeof(struct thread));
+    if (!idle) {
+        return NULL;
+    }
+    
+    /* Zero entire structure */
     mint_bzero(idle, sizeof(*idle));
-
-    idle->tid = -128;  // Negative tid to indicate idle thread
-    // Don't increment p->num_threads for idle thread
-    idle->proc = p;
-    strncpy(idle->name, "idle", 15);
-    idle->name[15] = '\0';
-    idle->priority = MIN_THREAD_PRIORITY - 1;  // Lowest possible priority
-    idle->original_priority = idle->priority;
-    idle->is_idle = 1;      // Mark as idle thread
-    idle->magic = CTXT_MAGIC;
-
-    // Allocate stack
+    
+    /* Allocate stack for idle thread */
     idle->stack = kmalloc(STKSIZE);
     if (!idle->stack) {
         kfree(idle);
         return NULL;
     }
+    
+    /* === Set ONLY non-zero fields === */
+    
+    /* Idle thread identity (negative tid indicates special thread) */
+    idle->tid = -128;
+    idle->proc = p;
+    idle->magic = CTXT_MAGIC;
+    idle->is_idle = 1;
+    strncpy(idle->name, "idle", 15);
+    idle->name[15] = '\0';
+    
+    /* Stack setup */
     idle->stack_size = STKSIZE;
     idle->stack_top = (char*)idle->stack + STKSIZE;
     idle->stack_magic = STACK_MAGIC;
     
+    /* Lowest possible priority (below all user threads) */
+    idle->priority = MIN_THREAD_PRIORITY;
+    idle->original_priority = idle->priority;
     idle->policy = DEFAULT_SCHED_POLICY;
+    
+    /* Scheduling timeslice */
     idle->timeslice = p->thread_default_timeslice;
     idle->remaining_timeslice = p->thread_default_timeslice;
-    idle->last_scheduled = 0;
- 
-    idle->priority_boost = 0;
-
-    idle->tsd_data = NULL;
-
-    idle->t_sigpending = 0;
-    THREAD_SIGMASK_SET(idle, p->p_sigmask);  /* Inherit process signal mask */
-    idle->t_sig_in_progress = 0;
-    idle->alarm_timeout = NULL;
-    idle->sig_stack = NULL;
-    idle->old_sigmask = 0;
-    for (i = 0; i < NSIG; i++) {
-        idle->sig_handlers[i].handler = NULL;
-        idle->sig_handlers[i].arg = NULL;
-    }
     
-    idle->wakeup_time = 0;  // No wakeup time initially
-    idle->next_sleeping = NULL;  // Not in sleep queue initially
-    idle->next_ready = NULL;  // Not in ready queue initially
-
-	idle->mutex_wait_obj = NULL;
-	idle->sem_wait_obj = NULL;
-	idle->sig_wait_obj = NULL;
-	idle->cond_wait_obj = NULL;
-	idle->join_wait_obj = NULL;
-    idle->wait_type = WAIT_NONE;  // Not waiting for anything initially
-    idle->sleep_reason = 0;  // No sleep reason initially
+    /* Inherit process signal mask */
+    THREAD_SIGMASK_SET(idle, p->p_sigmask);
     
-    // idle->errno = 0;  // No error initially
-
-    // Initialize join-related fields
-    idle->retval = NULL;
-    idle->joiner = NULL;
+    /* Idle thread is detached and not cancellable */
     idle->detached = 1;
-    idle->joined = 0;
-
-    idle->cancel_state = PTHREAD_CANCEL_DISABLE;  // Disable cancellation for idle thread
-    // For idle thread (system thread - NOT cancellable):
-    idle->cancel_type = PTHREAD_CANCEL_DEFERRED;  // Type doesn't matter when disabled
-    idle->cancel_pending = 0; // No pending cancellation    
-    idle->errno_ptr = NULL;  // Initialize errno pointer to NULL
-    idle->cleanup_stack = NULL; // No cleanup handlers
-
-    idle->t_sigqueue_head = NULL;
-    idle->t_sigqueue_tail = NULL;
-    idle->t_sigqueue_count = 0;
-
-    // Initialize context
+    idle->cancel_state = PTHREAD_CANCEL_DISABLE;
+    idle->cancel_type = PTHREAD_CANCEL_DEFERRED;
+    
+    /* Initialize context */
     init_thread_context(idle, idle_thread_func, (void *)p);
     
-    /* Set one idle thread per process */
-    p->idle_thread = idle;
-
-    // Link into process thread list
+    /* Link into process thread list (at head) */
     idle->next = p->threads;
     p->threads = idle;
-
-    atomic_thread_state_change(idle, (THREAD_STATE_READY ));
+    
+    /* Set as process idle thread */
+    p->idle_thread = idle;
+    
+    /* Make ready to run */
+    atomic_thread_state_change(idle, THREAD_STATE_READY);
     add_to_ready_queue(idle);
 
     TRACE_THREAD("IDLE: Created idle thread with tid %d", idle->tid);
 
     return idle;
-};
+}
 
+/******************************************************************************/
+/* get_idle_thread - Get or create idle thread for process                   */
+/******************************************************************************/
 struct thread* get_idle_thread(struct proc *p) {
-    if (!p) return NULL;
+    if (!p) {
+        return NULL;
+    }
     
-    if(!p->idle_thread)
+    /* Create idle thread if it doesn't exist yet */
+    if (!p->idle_thread) {
         return create_idle_thread(p);
-        
+    }
+    
     return p->idle_thread;
 }
 
+/******************************************************************************/
+/* get_main_thread - Get main thread (thread0) for process                   */
+/******************************************************************************/
 struct thread* get_main_thread(struct proc *p) {
-    struct thread *thread0 = NULL;
-    struct thread *t = NULL;
+    struct thread *t;
+    
+    /* Search for thread with tid=0 */
     for (t = p->threads; t != NULL; t = t->next) {
-        if (t->tid == 0 && t->magic == CTXT_MAGIC && !(t->state & THREAD_STATE_EXITED)) {
-            thread0 = t;
-            break;
+        if (t->tid == 0 && t->magic == CTXT_MAGIC && 
+            !(t->state & THREAD_STATE_EXITED)) {
+            return t;
         }
     }
-    return thread0;
+    
+    return NULL;
 }

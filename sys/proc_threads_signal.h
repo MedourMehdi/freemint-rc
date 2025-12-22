@@ -16,9 +16,34 @@
 #ifndef PROC_THREADS_SIGNAL_H
 #define PROC_THREADS_SIGNAL_H
 
-/* signal flags */
-# define SAS_OLDMASK	0x01		/* need to restore mask before pause */
-# define SAS_THREADED	0x02		/* process uses thread-specific signals */
+/* CPU detection */
+#ifdef __mc68020__
+#define HAS_BFFFO 1
+#else
+#define HAS_BFFFO 0
+#endif
+
+/* Lookup table for 68000 */
+extern const unsigned char sigbit_lookup[256];
+
+/* Find first set bit (1‑based, 0 if none) */
+static inline int find_first_signal_bit(ulong mask) {
+    if (!mask) return 0;
+#if HAS_BFFFO
+    int bit;
+    __asm__ volatile ("bfffo %1{#0:#32},%0" : "=d"(bit) : "d"(mask) : "cc");
+    return bit + 1;
+#else
+    if (mask & 0x000000FFUL) return sigbit_lookup[mask & 0xFF];
+    if (mask & 0x0000FF00UL) return sigbit_lookup[(mask >> 8) & 0xFF] + 8;
+    if (mask & 0x00FF0000UL) return sigbit_lookup[(mask >> 16) & 0xFF] + 16;
+    return sigbit_lookup[(mask >> 24) & 0xFF] + 24;
+#endif
+}
+
+// /* signal flags */
+// # define SAS_OLDMASK	0x01		/* need to restore mask before pause */
+// # define SAS_THREADED	0x02		/* process uses thread-specific signals */
 
 /* Thread signal handling macros */
 # define IS_THREAD_SIGNAL(sig) ((sig) > 0 && (sig) < NSIG)
@@ -37,24 +62,15 @@
 #define THREAD_SIGMASK_SET(t, mask) do { \
     (t)->t_sigmask = (mask) & ~UNMASKABLE; \
 } while(0)
- 
-/* Alternative version with validation */
-#define THREAD_SIGMASK_SET_SAFE(t, mask) do { \
-    if ((t) && (t)->magic == CTXT_MAGIC) { \
-        (t)->t_sigmask = (mask) & ~UNMASKABLE; \
-    } \
-} while(0)
 
 /* Add signals to thread mask (block additional signals) */
 #define THREAD_SIGMASK_ADD(t, mask) do { \
     (t)->t_sigmask |= ((mask) & ~UNMASKABLE); \
 } while(0)
 
-/* Alternative version with validation */
-#define THREAD_SIGMASK_ADD_SAFE(t, mask) do { \
-    if ((t) && (t)->magic == CTXT_MAGIC) { \
-        (t)->t_sigmask |= ((mask) & ~UNMASKABLE); \
-    } \
+/* Add signals to proc mask (block additional signals) */
+#define PROC_SIGMASK_ADD(t, mask) do { \
+    (t)->proc->p_sigmask |= ((mask) & ~UNMASKABLE); \
 } while(0)
 
 /* Add a single signal to mask */
@@ -98,7 +114,7 @@ void cleanup_signal_stack(PROC *p, long arg);
 /* Checks for pending signals in a thread, returns signal number or 0 */
 int check_thread_signals(struct thread *t);
 void handle_thread_signal(struct thread *t, int sig);
-
+// void proc_thread_handle_proc_signal(void);
 int dequeue_signal_info(PROC *p, struct thread *t, const sigset_t *set, siginfo_t *info);
 
 /* Delivers a signal to a specific thread, returns 1 if delivered, 0 otherwise */

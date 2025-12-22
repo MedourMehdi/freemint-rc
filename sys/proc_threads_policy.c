@@ -2,20 +2,12 @@
  * @file proc_threads_policy.c
  * @brief Kernel Thread Scheduling Policies
  * 
- * Implements scheduling parameter management and policy enforcement in kernel space.
+ * Implements scheduling parameter management and policy enforcement.
  * Handles priority control, timeslice allocation, and real-time scheduling.
  * 
- * @author Medour Mehdi
- * @date June 2025
- * @version 1.0
- */
-
-/**
- * Thread Scheduling Policies
- * 
- * Implements POSIX thread scheduling parameter management including priority
- * control, policy selection (SCHED_FIFO, SCHED_RR, SCHED_OTHER), and timeslice
- * configuration. Enables real-time scheduling capabilities.
+ * Author: Medour Mehdi
+ * Date: June 2025
+ * Version: 1.0
  */
 
 #include "proc_threads_policy.h"
@@ -40,7 +32,7 @@ static int get_rr_interval(struct thread *t, long *interval)
     if (!t || !interval)
         return EINVAL;
         
-    *interval = t->timeslice * 5; // Convert ticks to milliseconds (5ms per tick)
+    *interval = t->timeslice * 5; /* Convert ticks to milliseconds (5ms per tick) */
     return 0;
 }
 
@@ -49,7 +41,7 @@ static int get_rr_interval(struct thread *t, long *interval)
  * 
  * @param t The thread to modify
  * @param policy The new scheduling policy (SCHED_FIFO, SCHED_RR, SCHED_OTHER)
- * @param priority The new priority (0-99, with 0 being lowest)
+ * @param priority The new priority (scaled 0-16)
  * @return 0 on success, negative error code on failure
  */
 static int set_thread_policy(struct thread *t, enum sched_policy policy, int priority)
@@ -57,70 +49,70 @@ static int set_thread_policy(struct thread *t, enum sched_policy policy, int pri
     if (!t || t->magic != CTXT_MAGIC)
         return EINVAL;
 
-    // Validate process pointer
+    /* Validate process pointer */
     if (!t->proc)
         return EINVAL;
         
-    // Log the request
+    /* Log the request */
     TRACE_THREAD("POLICY: Setting thread %d policy to %d, priority to %d (current: policy=%d, pri=%d)",
                 t->tid, policy, priority, t->policy, t->priority);
 
-    // Acquire lock        
+    /* Acquire lock */
     register unsigned short sr = splhigh();
         
-    // Save old values
+    /* Save old values */
     int old_policy = t->policy;
     int old_priority = t->priority;
 
+    /* Check queue status before modifications to minimize splhigh duration */
     int was_running = (t->state == THREAD_STATE_RUNNING);
-    int was_in_ready_queue = is_in_ready_queue(t); 
+    int was_in_ready_queue = t->in_ready_queue;  /* O(1) flag check */
 
-    // Update policy
+    /* Update policy */
     t->policy = policy;
 
     if (!t->priority_boost) {
         t->original_priority = priority;
     }
 
-    // Update timeslice based on new policy
+    /* Update timeslice based on new policy */
     if (policy == SCHED_RR) {
         t->timeslice = t->proc->thread_rr_timeslice;
     } else if (policy == SCHED_FIFO) {
-        t->timeslice = 0;  // FIFO threads don't use timeslicing
+        t->timeslice = 0;  /* FIFO threads don't use timeslicing */
     } else {
         t->timeslice = t->proc->thread_default_timeslice;
     }
     
-    // Reset remaining timeslice
+    /* Reset remaining timeslice */
     t->remaining_timeslice = t->timeslice;
 
-    // Handle priority change according to POSIX rules
+    /* Handle priority change according to POSIX rules */
     if (was_running || was_in_ready_queue) {
-        // Remove from ready queue if present
+        /* Remove from ready queue if present */
         if (was_in_ready_queue) {
             remove_from_ready_queue(t);
         }
         
-        // Update priority
+        /* Update priority */
         t->priority = priority;
         
-        // POSIX: When priority is changed, thread goes to END of new priority queue
+        /* POSIX: When priority is changed, thread goes to END of new priority queue */
         if (was_in_ready_queue) {
-            add_to_ready_queue(t);  // This should add to end of priority queue
+            add_to_ready_queue(t);
         }
         
-        // If this was the running thread and priority was lowered, or policy changed to less favorable
+        /* If running thread and priority lowered or policy changed to less favorable */
         if (was_running) {
             int should_preempt = 0;
             
-            // Check if we should yield immediately
+            /* Check if we should yield immediately */
             if (priority < old_priority) {
                 should_preempt = 1;
                 TRACE_THREAD("POLICY: Thread %d priority lowered from %d to %d, will be preempted",
                             t->tid, old_priority, priority);
             } else if (old_policy == SCHED_FIFO && policy == SCHED_RR && priority == old_priority) {
                 should_preempt = 1;
-
                 TRACE_THREAD("POLICY: Thread %d changed from SCHED_FIFO to SCHED_RR, will be preempted",
                             t->tid);
             } else if (old_policy != SCHED_OTHER && policy == SCHED_OTHER) {
@@ -129,37 +121,33 @@ static int set_thread_policy(struct thread *t, enum sched_policy policy, int pri
             }
             
             if (should_preempt) {
-                // Add current thread to ready queue and trigger reschedule
+                /* Add current thread to ready queue and trigger reschedule */
                 atomic_thread_state_change(t, THREAD_STATE_READY);
                 add_to_ready_queue(t);
-                spl(sr);
+                spl(sr);  /* Release lock before scheduling */
                 proc_thread_schedule();
                 return 0;
             }
         }
     } else {
-        // Thread not running or ready, just update priority
+        /* Thread not running or ready, just update priority */
         t->priority = priority;
     }
 
 #if THREAD_DEBUG_LEVEL >= THREAD_DEBUG_NORMAL    
-    /* Legacy handling for compatibility - should be removed eventually */
     if (policy == SCHED_FIFO && was_running) {    
         if (priority > old_priority) {
-            // Higher priority should preempt immediately if there are lower priority threads
-            // This is handled by the scheduler, not here
             TRACE_THREAD("POLICY: Thread %d priority raised from %d to %d", t->tid, old_priority, priority);            
         } else if (priority < old_priority) {
-            // Lower priority should yield immediately - handled above
             TRACE_THREAD("POLICY: Thread %d priority lowered from %d to %d", t->tid, old_priority, priority);        
         }
     }
 #endif
     
-    #ifdef DEBUG_THREAD
+#ifdef DEBUG_THREAD
     TRACE_THREAD("THREAD_SCHED: Thread %d policy changed from %d to %d, priority from %d to %d, timeslice=%d",
                 t->tid, old_policy, policy, old_priority, priority, t->timeslice);
-    #endif
+#endif
     
     spl(sr);
     return 0;
@@ -176,22 +164,22 @@ long proc_thread_set_schedparam(long tid, long policy, long priority)
     if (!p)
         return EINVAL;
         
-    // Find thread by ID
+    /* Find thread by ID */
     if (tid < 0) {
-        // Use current thread
+        /* Use current thread */
         t = p->current_thread;
     } else {
-        // Find thread with specified ID
+        /* Find thread with specified ID */
         for (t = p->threads; t != NULL; t = t->next) {
             if (t->tid == tid)
                 break;
         }
         
         if (!t)
-            return ESRCH; // No such thread
+            return ESRCH; /* No such thread */
     }
     
-    // Scale the priority from 0-99 to 0-16 range
+    /* Scale the priority from 0-99 to 0-16 range */
     int scaled_priority = scale_thread_priority((int)priority);
     
     return set_thread_policy(t, (enum sched_policy)policy, scaled_priority);
@@ -208,23 +196,23 @@ long proc_thread_get_schedparam(long tid, long *policy, long *priority)
     if (!p || !policy || !priority)
         return EINVAL;
         
-    // Find thread by ID
+    /* Find thread by ID */
     if (tid < 0) {
-        // Use current thread
+        /* Use current thread */
         t = p->current_thread;
     } else {
-        // Find thread with specified ID
+        /* Find thread with specified ID */
         for (t = p->threads; t != NULL; t = t->next) {
             if (t->tid == tid)
                 break;
         }
         
         if (!t)
-            return ESRCH; // No such thread
+            return ESRCH; /* No such thread */
     }
     
     *policy = t->policy;
-    *priority = t->priority;
+    *priority = t->priority;  /* Returns internal 0-16 priority */
     
     return 0;
 }
@@ -240,19 +228,19 @@ long proc_thread_get_rrinterval(long tid, long *interval)
     if (!p || !interval)
         return EINVAL;
         
-    // Find thread by ID
+    /* Find thread by ID */
     if (tid < 0) {
-        // Use current thread
+        /* Use current thread */
         t = p->current_thread;
     } else {
-        // Find thread with specified ID
+        /* Find thread with specified ID */
         for (t = p->threads; t != NULL; t = t->next) {
             if (t->tid == tid)
                 break;
         }
         
         if (!t)
-            return ESRCH; // No such thread
+            return ESRCH; /* No such thread */
     }
     
     return get_rr_interval(t, interval);
@@ -269,19 +257,19 @@ long proc_thread_set_timeslice(long tid, long timeslice)
     if (!p)
         return EINVAL;
         
-    // Find thread by ID
+    /* Find thread by ID */
     if (tid < 0) {
-        // Use current thread
+        /* Use current thread */
         t = p->current_thread;
     } else {
-        // Find thread with specified ID
+        /* Find thread with specified ID */
         for (t = p->threads; t != NULL; t = t->next) {
             if (t->tid == tid)
                 break;
         }
         
         if (!t)
-            return ESRCH; // No such thread
+            return ESRCH; /* No such thread */
     }
     
     return set_thread_timeslice(t, timeslice);
@@ -298,19 +286,19 @@ long proc_thread_get_timeslice(long tid, long *timeslice, long *remaining)
     if (!p || !timeslice)
         return EINVAL;
         
-    // Find thread by ID
+    /* Find thread by ID */
     if (tid < 0) {
-        // Use current thread
+        /* Use current thread */
         t = p->current_thread;
     } else {
-        // Find thread with specified ID
+        /* Find thread with specified ID */
         for (t = p->threads; t != NULL; t = t->next) {
             if (t->tid == tid)
                 break;
         }
         
         if (!t)
-            return ESRCH; // No such thread
+            return ESRCH; /* No such thread */
     }
     
     *timeslice = t->timeslice;
@@ -332,11 +320,11 @@ static int set_thread_timeslice(struct thread *t, long timeslice)
     if (!t || t->magic != CTXT_MAGIC)
         return EINVAL;
 
-    // Validate process pointer
+    /* Validate process pointer */
     if (!t->proc)
         return EINVAL;
         
-    // Enforce minimum timeslice        
+    /* Enforce minimum timeslice */
     if (timeslice < t->proc->thread_min_timeslice)
         timeslice = t->proc->thread_min_timeslice;
 
@@ -344,7 +332,7 @@ static int set_thread_timeslice(struct thread *t, long timeslice)
 
     register unsigned short sr = splhigh();
     
-    // FIFO threads don't use timeslicing
+    /* FIFO threads don't use timeslicing */
     if (t->policy == SCHED_FIFO) {
         spl(sr);
         return 0;
@@ -377,20 +365,20 @@ void update_thread_timeslice(struct thread *t)
         
     unsigned long elapsed = get_system_ticks() - t->last_scheduled;
     
-    // Only update for non-FIFO threads
+    /* Only update for non-FIFO threads */
     if (t->policy != SCHED_FIFO) {
         if (t->remaining_timeslice <= elapsed) {
-            // Reset timeslice when expired
+            /* Reset timeslice when expired */
             t->remaining_timeslice = t->timeslice;
             reset_thread_priority(t);
         } else {
-            // Decrement remaining timeslice
+            /* Decrement remaining timeslice */
             t->remaining_timeslice -= elapsed;
         }
     }
 }
 
-// Function to set thread scheduling policy
+/* Function to set thread scheduling policy */
 long proc_thread_set_policy(enum sched_policy policy, short priority, short timeslice)
 {
     struct proc *p = curproc;
@@ -402,19 +390,18 @@ long proc_thread_set_policy(enum sched_policy policy, short priority, short time
     struct thread *current = p->current_thread;
     register unsigned short sr = splhigh();
     
-    // Scale the priority from 0-99 to 0-16 range
+    /* Scale the priority from 0-99 to 0-16 range */
     int scaled_priority = scale_thread_priority(priority);
     
-    // Set the policy and priority
+    /* Set the policy and priority */
     int result = set_thread_policy(current, policy, scaled_priority);
     
-    // Set timeslice if valid
+    /* Set timeslice if valid */
     if (timeslice > 0) {
         current->timeslice = timeslice;
         current->total_timeslice = timeslice;
     }
     
     spl(sr);
-    // return 0;
     return result;
 }

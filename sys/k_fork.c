@@ -47,6 +47,88 @@
 # include "time.h"
 # include "util.h"
 
+#include "proc_threads_debug.h"
+#include "proc_threads_signal.h"
+static int fork_setup_thread0(struct proc *parent, struct proc *child)
+{
+    struct thread *pt = parent->current_thread;
+    struct thread *ct;
+    
+    /* Parent must be in thread0 */
+    if (!pt || pt->tid != 0) {
+        TRACE_THREAD("FORK: Can only fork from thread0");
+        return ENOSYS;
+    }
+    
+    /* Allocate child thread0 */
+    ct = kmalloc(sizeof(struct thread));
+    if (!ct) return ENOMEM;
+    
+    mint_bzero(ct, sizeof(*ct));
+    
+    /* Basic thread0 setup */
+    ct->proc = child;
+    ct->tid = 0;
+    ct->magic = CTXT_MAGIC;
+    ct->stack = child->stack;  /* Uses process kernel stack */
+    ct->stack_top = (char*)child->stack + STKSIZE;
+    ct->stack_size = STKSIZE;
+    ct->stack_magic = STACK_MAGIC;
+    
+    /* Copy ONLY SYSCALL context - discard exception-frame SSP */
+    memcpy(&ct->ctxt[SYSCALL], &pt->ctxt[SYSCALL], sizeof(CONTEXT));
+    ct->ctxt[CURRENT] = ct->ctxt[SYSCALL];
+    
+    /* Use child's sysstack (already set to STKSIZE-12) for SSP */
+    ct->ctxt[SYSCALL].ssp = child->sysstack;
+    ct->ctxt[CURRENT].ssp = child->sysstack;
+ 
+    /* Link to child process */
+    child->current_thread = ct;
+    child->threads = ct;
+    child->num_threads = 1;
+    child->total_threads = 1;
+	child->p_flag &= ~P_FLAG_THREADED;
+
+    /* Child returns 0 from fork() */
+    ct->ctxt[SYSCALL].regs[0] = 0;
+    ct->ctxt[CURRENT].regs[0] = 0;
+    
+    /* Ensure user mode */
+    ct->ctxt[SYSCALL].sr &= ~0x2000;
+    ct->ctxt[CURRENT].sr &= ~0x2000;
+    
+    /* Inherit signal mask */
+    THREAD_SIGMASK_SET(ct, THREAD_SIGMASK(pt));
+
+    TRACE_THREAD("FORK_CLONE: Inherited thread0 mask=0x%lx from parent, process mask=0x%lx",
+                 THREAD_SIGMASK(ct), child->p_sigmask);
+	
+    /* Forked children start as traditional single-threaded processes
+     * Clear ALL thread-specific signal state */
+    ct->t_sigpending = 0;
+    ct->t_sig_in_progress = 0;
+    ct->sig_wait_obj = NULL;
+    memset(ct->sig_handlers, 0, sizeof(ct->sig_handlers));
+    
+    if (child->p_sigacts) {
+        /* Disable thread signals for forked child */
+        child->p_sigacts->thread_signals = 0;
+        child->p_sigacts->flags &= ~SAS_THREADED;
+        TRACE_THREAD("FORK_CLONE: Disabled thread signals in child PID %d", child->pid);
+    }
+
+    TRACE_THREAD("FORK_CLONE: Child thread0 context set up:");
+    TRACE_THREAD("  PC=%08lx, SR=%04x, USP=%08lx, SSP=%08lx (sysstack)",
+                ct->ctxt[CURRENT].pc,
+                ct->ctxt[CURRENT].sr,
+                ct->ctxt[CURRENT].usp,
+                ct->ctxt[CURRENT].ssp);
+    TRACE_THREAD("  Child stack: base=%p, top=%p, sysstack=%lx", 
+                child->stack, ct->stack_top, child->sysstack);
+
+    return 0;
+}
 
 /*
  * duplicate process p1
@@ -58,6 +140,7 @@ fork_proc1 (struct proc *p1, long flags, long *err)
 	struct proc *p2;
 
 	if(p1->current_thread && p1->current_thread->tid != 0){
+		TRACE_THREAD("FORK: Current thread is not 0, it's %d for proc id %d, returning ENOSYS", p1->current_thread->tid, p1->pid);
 		if(err) *err = ENOSYS;
 		return NULL;
 	}
@@ -116,11 +199,20 @@ fork_proc1 (struct proc *p1, long flags, long *err)
 	p2->q_next = NULL;
 	p2->wait_q = 0;
 
-/* Initialize thread-related fields */
+	/* Initialize thread-related fields */
 	p2->current_thread = NULL;
 	p2->threads = NULL;
 	p2->num_threads = 0;
 	p2->total_threads = 0;
+
+	/* If parent is threaded, setup thread0 for child */
+	if (p1->current_thread) {
+		int result = fork_setup_thread0(p1, p2);
+		if (result != 0) {
+			if (err) *err = result;
+			goto nomem;
+		}
+	}
 
 	/* Initialize thread scheduling parameters - inherit from parent */
 	p2->thread_preempt_interval = p1->thread_preempt_interval;
@@ -145,7 +237,7 @@ fork_proc1 (struct proc *p1, long flags, long *err)
 	p2->thread_keys = NULL;
 	p2->next_key = 0;
 	p2->proc_tsd_data = NULL;
-	p2->thread_signals_enabled = p1->thread_signals_enabled;
+	// p2->p_sigacts->thread_signals = (p1->current_thread != NULL);
 
 	/* Duplicate command line */
 # ifndef M68000

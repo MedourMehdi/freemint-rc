@@ -167,4 +167,8 @@ struct sigacts
 /* helper macro */
 # define SIGACTION(p, sig)		((p)->p_sigacts->sigact[(sig)])
 
+/* signal flags */
+# define SAS_OLDMASK	0x01		/* need to restore mask before pause */
+# define SAS_THREADED	0x02		/* process uses thread-specific signals */
+
 # endif /* _mint_signal_h */

@@ -326,6 +326,12 @@ long _cdecl sys_p_thread_signal(long func, long arg1, long arg2) {
             struct thread *target = NULL;
             struct proc *p = curproc;
             
+            if(!p->current_thread || !p->total_threads) {
+                TRACE_THREAD("PTSIG_KILL: No threads in process %d", p->pid);
+
+                return ESRCH;
+            }
+
             /* Find thread by ID */
             register unsigned short sr = splhigh();
             struct thread *t;
@@ -345,7 +351,7 @@ long _cdecl sys_p_thread_signal(long func, long arg1, long arg2) {
             /* Send signal to target thread */
             TRACE_THREAD("PTSIG_KILL: Trying to Send signal %ld to thread %d", arg2, target->tid);
             retval = proc_thread_signal_kill(target, (int)arg2);
-            TRACE_THREAD("PTSIG_KILL: Returning %ld to userspace", retval);  // ← ADD THIS
+            TRACE_THREAD("PTSIG_KILL: Returning %ld to userspace", retval);
             return retval;
             }
 
@@ -353,6 +359,10 @@ long _cdecl sys_p_thread_signal(long func, long arg1, long arg2) {
             if (CURTHREAD) {
                 TRACE_THREAD("K: PTSIG_GETMASK returning t->t_sigmask=0x%08lx for tid=%d",
                             (ulong)CURTHREAD->t_sigmask, CURTHREAD->tid);
+                /* If TID 0, we must ensure we return the authoritative process mask */
+                if (CURTHREAD->tid == 0) {
+                    return CURTHREAD->proc->p_sigmask;
+                }
                 return CURTHREAD->t_sigmask;
             }
             return 0;
@@ -374,9 +384,11 @@ long _cdecl sys_p_thread_signal(long func, long arg1, long arg2) {
                 if (!t) return EINVAL;
                 TRACE_THREAD("K: PTSIG_UNBLOCK arg=0x%08lx for tid=%d (before t_sigmask=0x%08lx)",
                             (ulong)arg1, t ? t->tid : -1, t ? t->t_sigmask : 0UL);                
-                ulong old_mask = t->t_sigmask;
                 t->t_sigmask &= ~(arg1 & ~UNMASKABLE);
-                return old_mask;
+                if (t->tid == 0) {
+                    t->proc->p_sigmask &= ~(arg1 & ~UNMASKABLE);
+                }
+                return 0;
             }
             
         case PTSIG_WAIT:

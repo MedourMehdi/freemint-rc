@@ -85,10 +85,13 @@ struct thread {
     
     /* Thread state and scheduling */
     short state;                    /* Thread state (RUNNING/READY/BLOCKED) */
-	short is_idle;                    /* Flag indicating if this is an idle thread */
-    short priority;                 /* Thread priority */
-    short original_priority;        /* Original priority (for restoration after boost) */
-    short priority_boost;           /* Flag indicating if priority is currently boosted */
+	unsigned char has_run;          /* Flag indicating if thread has run at least once */
+	unsigned char is_idle;          /* Flag indicating if this is an idle thread */
+	unsigned char in_ready_queue;   /* Flag indicating if thread is in ready queue */
+	unsigned char in_sleep_queue;   /* O(1) sleep queue membership flag */
+    unsigned char priority;                 /* Thread priority */
+    unsigned char original_priority;        /* Original priority (for restoration after boost) */
+    unsigned char priority_boost;           /* Flag indicating if priority is currently boosted */
     short timeslice;                /* Timeslice for this thread */
     short remaining_timeslice;      /* Remaining timeslice */
     short total_timeslice;          /* Total timeslice allocated to this thread */
@@ -108,13 +111,13 @@ struct thread {
     void* (*func)(void*);            /* Function to execute */
     void *arg;                      /* Argument to pass to function */
 
-    short cancel_state;      // ENABLE/DISABLE
-    short cancel_type;       // DEFERRED/ASYNCHRONOUS
-    short cancel_pending;    // Flag for pending cancellation	
-    short cancel_requested;  // 1 if async cancellation should happen ASAP
+    unsigned char cancel_state;      // ENABLE/DISABLE
+    unsigned char cancel_type;       // DEFERRED/ASYNCHRONOUS
+    unsigned char cancel_pending;    // Flag for pending cancellation	
+    unsigned char cancel_requested;  // 1 if async cancellation should happen ASAP
 	
     /* Sleep and wait information */
-    short sleep_reason;             /* Reason for sleep (0 = woken by signal/other, 1 = timeout) */
+    unsigned char sleep_reason;             /* Reason for sleep (0 = woken by signal/other, 1 = timeout) */
 	TIMEOUT *sleep_timeout;  		// Timeout for sleeping
     TIMEOUT *alarm_timeout;         /* Per-thread alarm timeout */
     short wait_type;                /* Type of wait (WAIT_SIGNAL, WAIT_MUTEX, WAIT_CONDVAR, WAIT_IO, etc.) */
@@ -127,23 +130,22 @@ struct thread {
     /* Scheduling and timing */
     unsigned long wakeup_time;      /* Wakeup time in ticks */
     unsigned long last_scheduled;   /* Last time this thread was scheduled (in ticks) */
-	unsigned long cpu_time;         /* Total CPU time used by this thread (in ticks) */
 
     /* Thread join fields */
-    void *retval;                /* Return value from proc_thread_exit */
-    struct thread *joiner;       /* Thread that is joining this thread */
-    short detached;                /* Whether thread is detached */
-    short joined;                  /* Whether thread has been joined */
-    void **join_retval;          /* Where to store return value for joiner */
+    void *retval;					/* Return value from proc_thread_exit */
+    struct thread *joiner;			/* Thread that is joining this thread */
+    unsigned char detached;			/* Whether thread is detached */
+    unsigned char joined;			/* Whether thread has been joined */
+    void **join_retval;				/* Where to store return value for joiner */
     
     /* Thread-specific data */
-    void **tsd_data;             /* Array of thread-specific data pointers */
+    void **tsd_data;				/* Array of thread-specific data pointers */
 	/* Thread cleanup handlers */
-	void *cleanup_stack;           /* Stack of cleanup handlers (LIFO) */
+	void *cleanup_stack;			/* Stack of cleanup handlers (LIFO) */
     /* Signal handling */
     unsigned long t_sigpending;     /* Signals pending for this thread */
     unsigned long t_sigmask;        /* Thread-specific signal mask */
-    short t_sig_in_progress;        /* Signal currently being processed */
+    unsigned long t_sig_in_progress;/* Signal currently being processed */
     CONTEXT sig_ctx;           		/* Signal handler context */
 	CONTEXT saved_ctx;      		/* Saved context before signal */
     void *sig_stack;           		/* Signal handler stack */
@@ -153,11 +155,11 @@ struct thread {
         void (*handler)(int, void*);
         void *arg;
     } sig_handlers[32];
-	int * errno_ptr;                   /* Pointer to thread-specific errno */
+	int * errno_ptr;				/* Pointer to thread-specific errno */
 	/* Signal queue for real-time signals (per-thread) */
 	struct sigqueue_entry *t_sigqueue_head;
 	struct sigqueue_entry *t_sigqueue_tail;
-	int t_sigqueue_count;
+	unsigned char t_sigqueue_count;
 };
 
 /**
@@ -326,6 +328,8 @@ struct proc
 # define P_FLAG_SLO	0x0004		/* Flag for exec_region() */
 # define P_FLAG_SUPER	0x0008		/* Program called Super() or Supexec() */
 # define P_FLAG_BER	0x0010		/* Program wanted to record the bus error vector */
+# define P_FLAG_SIGWAIT 0x0020      /* Classic process is inside sigwaitinfo() */
+# define P_FLAG_THREADED 0x0040  /* Process is using threading */
 
 	ushort	p_flag;
 	ushort	p_stat;			/* */

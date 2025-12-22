@@ -77,22 +77,18 @@ sendsig(ushort sig)
 # define oldsysctxt (contexts[1])
 
 	/* NEW: Use current thread context if threading enabled */
-	if (p->p_sigacts && p->p_sigacts->thread_signals && t && t->magic == CTXT_MAGIC && t->tid > 0) {
-		/* Check thread-specific handler first */
-		if (((sig) > 0 && (sig) < NSIG) && t->sig_handlers[sig].handler) {
-			TRACE_THREAD("sendsig: using thread-specific handler for sig %d, thread %d", 
-			             sig, t->tid);
-			/* Thread signal will be handled via thread_signal_trampoline */
-			/* This path shouldn't normally be reached as thread signals use trampoline */
-			return 0;
-		}
-		
+	if (p->p_sigacts && p->p_sigacts->thread_signals && t && t->magic == CTXT_MAGIC 
+		&& t->tid != 0
+	) {
+		TRACE_THREAD("sendsig: using thread-specific handler for sig %d, thread %d", 
+		             sig, t->tid);
 		/* Use thread stack for validation */
 		stack_base_for_validation = t->stack;
 		stack_size_for_validation = t->stack_size;
 		
 		assert(t->stack_magic == STACK_MAGIC);
 	} else {
+		TRACE_THREAD("sendsig: using process-specific handler for sig %d", sig);
 		/* Use process stack */
 		stack_base_for_validation = p->stack;
 		stack_size_for_validation = STKSIZE;
@@ -147,41 +143,6 @@ sendsig(ushort sig)
 	}
 	
 	++curproc->nsigs;
-
-	if (curproc->p_flag & P_FLAG_SYS)
-	{
-		/* This is a system process, e.g. a kernel thread. We can't
-		 * go into user mode for signal handling. As we know we are
-		 * already in kernel and a kernel thread must rts from the
-		 * signal handler we can simply callout the signal handler
-		 * as function.
-		 */
-		
-		DEBUG(("system process, calling signal handler 0x%lx (%d)(%s) directly", sigact->sa_handler, sig, curproc->name));
-		
-		if (is_siginfo) {
-			/* Call extended handler for system process */
-			siginfo_t info;
-			memset(&info, 0, sizeof(info));
-			info.si_signo = sig;
-			info.si_code = SI_USER;
-			TRACE_THREAD("Calling extended signal handler for system process %d", curproc->pid);
-			curproc->p_sigacts->sa_sigaction_ext[sig](sig, &info, NULL);
-		} else {
-			TRACE_THREAD("Calling standard signal handler for system process %d", curproc->pid);
-			((void (*)(short)) sigact->sa_handler)(sig);
-		}
-		
-		if (sigact->sa_flags & SA_RESETHAND)
-		{
-			TRACE(("resetting sa_handler"));
-			
-			sigact->sa_handler = SIG_DFL;
-			sigact->sa_flags &= ~SA_RESETHAND;
-		}
-		
-		return 0;
-	}
 
 	call = &(curproc->ctxt[SYSCALL]);
 	

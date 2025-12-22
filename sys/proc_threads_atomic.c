@@ -16,131 +16,146 @@
 #include "proc_threads_sleep_yield.h"
 #include "mint/arch/asm_spl.h"
 
-/* Atomic operations implementation */
-#ifdef __mcoldfire__
-/* ColdFire version - uses different instructions */
-static inline void disable_interrupts(unsigned short *sr) {
-    asm volatile ("move.w %%sr,%0" : "=d" (*sr));
-    asm volatile ("move.w #0x2700,%%sr" : : : "memory");
-}
+/* ============================================================================
+ * LOW-LEVEL TAS IMPLEMENTATION
+ * ============================================================================ */
 
-static inline void restore_interrupts(unsigned short sr) {
-    asm volatile ("move.w %0,%%sr" : : "d" (sr) : "memory");
+/**
+ * M68K TAS instruction implementation with ColdFire support
+ * 
+ * TAS (Test and Set) is an atomic read-modify-write operation:
+ * 1. Tests if memory location is 0
+ * 2. Sets it to 0xFF (all bits set)
+ * 3. Returns the original value in the Z flag
+ * 
+ * Z=1 means it was 0 (unlocked) - we acquired the lock
+ * Z=0 means it was non-zero (locked) - acquisition failed
+ */
+
+#ifdef __mcoldfire__
+/* ColdFire version - limited instruction set */
+int tas_try_lock(volatile unsigned char *lock_byte) {
+    register unsigned char result;
+    __asm__ volatile (
+        "tas %1\n\t"        /* Test and set the lock byte; sets Z flag if it was 0 */
+        "beq 1f\n\t"        /* If Z=1 (was 0) branch to label 1 -> we acquired the lock */
+        "moveq #0,%0\n\t"   /* acquisition failed -> result = 0 */
+        "bra 2f\n\t"
+        "1:\n\t"
+        "moveq #1,%0\n\t"   /* acquisition succeeded -> result = 1 */
+        "2:\n\t"
+        : "=d" (result), "+m" (*lock_byte)
+        :
+        : "cc"
+    );
+    return result;
 }
 #else
-/* Original 68k version */
-static inline void disable_interrupts(unsigned short *sr) {
-    asm volatile ("move.w %%sr,%0" : "=d" (*sr));
-    asm volatile ("ori.w #0x0700,%%sr" : : : "memory");
-}
-
-static inline void restore_interrupts(unsigned short sr) {
-    asm volatile ("move.w %0,%%sr" : : "d" (sr) : "memory");
+/* Standard m68k version - single-cycle TAS */
+int tas_try_lock(volatile unsigned char *lock_byte) {
+    register unsigned char result;
+    __asm__ volatile (
+        "tas %1\n\t"        /* Test and set the lock byte */
+        "seq %0\n\t"        /* Set if equal (Z=1, was unlocked) */
+        "negb %0\n\t"       /* Convert to 0/1 */
+        "andb #1,%0"        /* Mask to boolean */
+        : "=d" (result), "+m" (*lock_byte)
+        :
+        : "cc"
+    );
+    return result;
 }
 #endif
 
+/* Optimized unlock using CLR instruction */
+void tas_unlock(volatile unsigned char *lock_byte) {
+    /* CLR.B is 4 cycles vs 8 for MOVE.B #0 on m68k */
+    __asm__ volatile ("clr.b %0" : "=m" (*lock_byte));
+}
+
+/* ============================================================================
+ * ATOMIC OPERATIONS USING INTERRUPT DISABLE
+ * ============================================================================ */
 inline int atomic_increment(volatile int *value) {
-    unsigned short sr;
     int result;
-    disable_interrupts(&sr);
+    register unsigned short sr = splhigh();
     result = ++(*value);
-    restore_interrupts(sr);
+    spl(sr);
     return result;
 }
 
 inline int atomic_decrement(volatile int *value) {
-    unsigned short sr;
     int result;
-    disable_interrupts(&sr);
+    register unsigned short sr = splhigh();
     result = --(*value);
-    restore_interrupts(sr);
+    spl(sr);
     return result;
 }
 
 inline int atomic_cas(volatile int *ptr, int oldval, int newval) {
-    unsigned short sr;
     int result;
-    disable_interrupts(&sr);
+    register unsigned short sr = splhigh();
     if (*ptr == oldval) {
         *ptr = newval;
         result = 1;  /* Success - old value matched */
     } else {
         result = 0;  /* Failure - old value didn't match */
     }
-    restore_interrupts(sr);
+    spl(sr);
     return result;
 }
 
-// /* Alternative implementation that returns the actual old value */
-// int atomic_cas_with_old_value(volatile int *ptr, int oldval, int newval) {
-//     unsigned short sr;
-//     int old_value;
-//     disable_interrupts(&sr);
-//     old_value = *ptr;
-//     if (old_value == oldval) {
-//         *ptr = newval;
-//     }
-//     restore_interrupts(sr);
-//     return old_value;  /* Return actual old value */
-// }
-
 inline int atomic_exchange(volatile int *ptr, int newval) {
-    unsigned short sr;
     int oldval;
-    disable_interrupts(&sr);
+    register unsigned short sr = splhigh();
     oldval = *ptr;
     *ptr = newval;
-    restore_interrupts(sr);
+    spl(sr);
     return oldval;
 }
 
 inline int atomic_add(volatile int *ptr, int value) {
-    unsigned short sr;
     int result;
-    disable_interrupts(&sr);
+    register unsigned short sr = splhigh();
     result = (*ptr) + value;
     *ptr = result;
-    restore_interrupts(sr);
+    spl(sr);
     return result;
 }
 
 inline int atomic_sub(volatile int *ptr, int value) {
-    unsigned short sr;
     int result;
-    disable_interrupts(&sr);
+    register unsigned short sr = splhigh();
     result = (*ptr) - value;
     *ptr = result;
-    restore_interrupts(sr);
+    spl(sr);
     return result;
 }
 
 inline int atomic_or(volatile int *ptr, int value) {
-    unsigned short sr;
     int result;
-    disable_interrupts(&sr);
+    register unsigned short sr = splhigh();
     result = (*ptr) | value;
     *ptr = result;
-    restore_interrupts(sr);
+    spl(sr);
     return result;
 }
 
 inline int atomic_and(volatile int *ptr, int value) {
-    unsigned short sr;
     int result;
-    disable_interrupts(&sr);
+    register unsigned short sr = splhigh();
     result = (*ptr) & value;
     *ptr = result;
-    restore_interrupts(sr);
+    spl(sr);
     return result;
 }
 
 inline int atomic_xor(volatile int *ptr, int value) {
-    unsigned short sr;
     int result;
-    disable_interrupts(&sr);
+    register unsigned short sr = splhigh();
     result = (*ptr) ^ value;
     *ptr = result;
-    restore_interrupts(sr);
+    spl(sr);
     return result;
 }
 
@@ -166,7 +181,7 @@ int thread_atomic_list_add(struct thread **head, struct thread *new_thread) {
         return EINVAL;
     }
     
-    unsigned short sr = splhigh();
+    register unsigned short sr = splhigh();
     new_thread->next = *head;
     *head = new_thread;
     spl(sr);
@@ -179,7 +194,7 @@ int thread_atomic_list_remove(struct thread **head, struct thread *thread_to_rem
         return EINVAL;
     }
     
-    unsigned short sr = splhigh();
+    register unsigned short sr = splhigh();
     struct thread *current = *head;
     struct thread *prev = NULL;
     
@@ -202,6 +217,10 @@ int thread_atomic_list_remove(struct thread **head, struct thread *thread_to_rem
     return ESRCH;  /* Thread not found in list */
 }
 
+/* ============================================================================
+ * SPINLOCK IMPLEMENTATION (Built on TAS)
+ * ============================================================================ */
+
 inline void spinlock_init(spinlock_t *lock) {
     lock->locked = 0;
     lock->owner_tid = -1;
@@ -209,9 +228,13 @@ inline void spinlock_init(spinlock_t *lock) {
 
 inline void spinlock_lock(spinlock_t *lock) {
     struct thread *t = CURTHREAD;
-    int tid = t ? t->tid : -1;
-    
-    while (thread_atomic_test_and_set(&lock->locked)) {
+    short tid = t ? t->tid : -1;
+
+    /* Spin using TAS until we acquire the lock */
+    /* Use yielding spinlock to avoid burning CPU cycles */
+    while (!tas_try_lock(&lock->locked)) {
+        /* Small delay before retry to reduce bus contention */
+        MEMORY_BARRIER();        
         proc_thread_yield();
     }
     
@@ -221,9 +244,9 @@ inline void spinlock_lock(spinlock_t *lock) {
 
 inline int spinlock_trylock(spinlock_t *lock) {
     struct thread *t = CURTHREAD;
-    int tid = t ? t->tid : -1;
+    short tid = t ? t->tid : -1;
     
-    if (thread_atomic_test_and_set(&lock->locked) == 0) {
+    if (tas_try_lock(&lock->locked)) {
         lock->owner_tid = tid;
         MEMORY_BARRIER();
         return 1;  /* Success */
@@ -234,5 +257,5 @@ inline int spinlock_trylock(spinlock_t *lock) {
 inline void spinlock_unlock(spinlock_t *lock) {
     MEMORY_BARRIER();
     lock->owner_tid = -1;
-    thread_atomic_clear(&lock->locked);
+    tas_unlock(&lock->locked);
 }

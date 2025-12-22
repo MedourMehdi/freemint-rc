@@ -16,6 +16,44 @@
 
 #include "proc_threads.h"
 
+/* ============================================================================
+ * LOW-LEVEL TAS OPERATIONS - Direct hardware TAS instruction
+ * ============================================================================
+ * These provide the fastest possible locking using the m68k TAS instruction.
+ * Use these for:
+ *  - Kernel internal locks where you know the context
+ *  - Very short critical sections (< 10 instructions)
+ *  - Cases where you can't use spinlocks (already in interrupt context)
+ */
+
+/**
+ * Try to acquire lock using TAS instruction
+ * @return 1 if lock acquired, 0 if already locked
+ */
+int tas_try_lock(volatile unsigned char *lock_byte);
+
+/**
+ * Release TAS lock
+ */
+void tas_unlock(volatile unsigned char *lock_byte);
+
+/**
+ * Check if TAS lock is held (non-blocking read)
+ * @return Non-zero if locked, 0 if free
+ */
+static inline int tas_is_locked(volatile unsigned char *lock_byte) {
+    return *lock_byte;
+}
+
+/* ============================================================================
+ * SPINLOCK OPERATIONS - Higher-level locks with ownership tracking
+ * ============================================================================
+ * Use these for:
+ *  - General purpose kernel locking
+ *  - Cases where you need to know who owns the lock (debugging)
+ *  - Longer critical sections
+ */
+
 /* Thread-safe linked list operations */
 int thread_atomic_list_add(struct thread **head, struct thread *new_thread);
 int thread_atomic_list_remove(struct thread **head, struct thread *thread_to_remove);
@@ -27,11 +65,19 @@ int thread_atomic_list_remove(struct thread **head, struct thread *thread_to_rem
 #define MEMORY_BARRIER() asm volatile("" : : : "memory")
 #endif
 
-/* Spinlock implementation using atomic operations */
+/**
+ * Spinlock structure - uses TAS for actual locking
+ * Adds ownership tracking for debugging
+ */
 typedef struct {
-    volatile int locked;
-    int owner_tid;  /* For debugging */
+    volatile unsigned char locked;    /* Byte for TAS instruction */
+    unsigned char padding;            /* Alignment padding */
+    int owner_tid;                    /* Debugging only */
 } spinlock_t;
+
+/**
+ * Spinlock operations - wrap TAS with ownership tracking
+ */
 
 inline void spinlock_init(spinlock_t *lock);
 inline void spinlock_lock(spinlock_t *lock);
@@ -72,15 +118,20 @@ inline int atomic_cas(volatile int *ptr, int oldval, int newval);
 inline int atomic_decrement(volatile int *value);
 inline int atomic_increment(volatile int *value);
 
-/* Convenience functions for internal kernel use */
-/* Kernel-internal atomic operations */
+/* ============================================================================
+ * CONVENIENCE MACROS AND WRAPPERS
+ * ============================================================================ */
+
+/* Kernel-internal atomic operation aliases */
 #define thread_atomic_increment(x) atomic_increment(x)
 #define thread_atomic_decrement(x) atomic_decrement(x)
 #define thread_atomic_cas(x, y, z) atomic_cas(x, y, z)
 #define thread_atomic_exchange(x, y) atomic_exchange(x, y)
+
 /* Reference counting operations */
 #define thread_refcount_inc(x) atomic_increment(x)
 #define thread_refcount_dec(x) atomic_decrement(x)
+
 /* Flag operations */
 #define thread_atomic_test_and_set(x)   atomic_exchange(x, 1)
 #define thread_atomic_clear(x)          atomic_exchange(x, 0)
@@ -91,5 +142,20 @@ inline int atomic_increment(volatile int *value);
 #define ATOMIC_CAS(ptr, old, new) thread_atomic_cas(&(ptr), (old), (new))
 #define ATOMIC_SET(var, val) thread_atomic_exchange(&(var), (val))
 #define ATOMIC_GET(var) (*(volatile int*)&(var))
+
+/* ============================================================================
+ * USAGE GUIDELINES
+ * ============================================================================
+ * 
+ * TAS locks (tas_try_lock/tas_unlock):
+ *   - Fastest option - single instruction
+ *   - No ownership tracking
+ *   - Use for very short critical sections
+ * 
+ * Spinlocks (spinlock_lock/spinlock_unlock):
+ *   - Built on TAS but adds owner tracking
+ *   - Better for debugging
+ *   - Use for general purpose locking
+ */
 
 #endif /* PROC_THREADS_ATOMIC_H */

@@ -8,40 +8,33 @@
  *  - Scheduling utilities
  *  - System tick access
  * 
- * Provides fast lookup tables for priority management and
- * atomic thread state transitions critical for scheduler operation.
+ * Provides fast lookup tables and atomic operations optimized for m68000.
  * 
  * Author: Medour Mehdi
  * Date: June 2025
  * Version: 1.0
  */
 
-#include "proc_threads.h"
-
 #ifndef PROC_THREADS_HELPER_H
 #define PROC_THREADS_HELPER_H
 
-long sys_p_thread_getid(void);
+#include "proc_threads.h"
 
+long sys_p_thread_getid(void);
 void atomic_thread_state_change(struct thread *t, int new_state);
 struct thread *get_highest_priority_thread(struct proc *p);
 unsigned long get_system_ticks(void);
 void make_process_eligible(struct proc *p);
 void boost_thread_priority(struct thread *t, int boost_amount);
 void reset_thread_priority(struct thread *t);
-
 long timeout_remaining(TIMEOUT *t);
 
-extern const unsigned char bit_table[256];
+/* Lookup tables - must be extern for inline functions */
+extern const unsigned char priority_scale_table[100];
 
-int find_highest_priority_bit(unsigned char bitmap);
-int find_highest_priority_bit_word(unsigned short bitmap);
-int scale_thread_priority(int priority);
+inline int find_highest_priority_bit_word(unsigned short bitmap);
+inline int scale_thread_priority(int priority);
 
 struct thread *proc_thread_find(struct proc *p, short tid);
 
- /* TAS-based atomic operations */
-inline int tas_try_lock(volatile unsigned char *lock_byte);
-inline void tas_unlock(volatile unsigned char *lock_byte);
-inline int tas_is_locked(volatile unsigned char *lock_byte);
 #endif //PROC_THREADS_HELPER_H

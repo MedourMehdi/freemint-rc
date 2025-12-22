@@ -462,7 +462,9 @@ do_wakeup_things(short sr, int newslice, long cond)
 		if (p->pid)
 		{
 			/* Check stack underflow - handle both threaded and non-threaded processes */
-			if (current_thread && current_thread->tid != 0) {
+			if (current_thread 
+				&& current_thread->tid != 0
+			) {
 				/* Multi-threaded process: check current thread's stack */
 				if (((long) &foo) < ((long) current_thread->stack + ISTKSIZE + 512))
 				{
@@ -674,11 +676,11 @@ sleep(int _que, long cond)
 	rm_q(READY_Q, p);
 	spl(sr);
 
-	// if(curproc->current_thread) TRACE_THREAD("PROC_SLEEP WARNING: %d", p->pid);
-
 	/* Switch to main thread for multi-threaded processes */
-	if (curproc->current_thread) {
-		// TRACE_THREAD("SLEEP save_context THREAD ID %d", curproc->current_thread->tid);
+	if (curproc->current_thread 
+		&& curproc->current_thread->tid != 0
+	) {
+		TRACE_THREAD("SLEEPPROC: save_context THREAD ID %d, process ID %d", curproc->current_thread->tid, curproc->pid);
 		_ctx = &(curproc->current_thread->ctxt[SYSCALL]);
 	} else {
 		_ctx = &(curproc->ctxt[CURRENT]);
@@ -703,10 +705,17 @@ sleep(int _que, long cond)
 	curproc = p;
 
 	/* Switch to main thread for multi-threaded processes */
-	if (curproc->current_thread) {
-		// TRACE_THREAD("SLEEP change_context THREAD ID %d", curproc->current_thread->tid);
+	if (curproc->current_thread 
+		&& curproc->current_thread->tid != 0
+	) {
+		TRACE_THREAD("SLEEPPROC: change_context THREAD ID %d, process ID %d", curproc->current_thread->tid, curproc->pid);
 		_ctx = &(curproc->current_thread->ctxt[SYSCALL]);
-		// curproc->current_thread->last_scheduled = get_system_ticks();
+		TRACE_THREAD("SLEEPPROC: Switching to process %d, context:", curproc->pid);
+		TRACE_THREAD("  PC=%08lx, SR=%04x, USP=%08lx, SSP=%08lx",
+					_ctx->pc,
+					_ctx->sr,
+					_ctx->usp,
+					_ctx->ssp);
 	} else {
 		_ctx = &(curproc->ctxt[CURRENT]);
 	}

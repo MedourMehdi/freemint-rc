@@ -109,8 +109,7 @@ killgroup (int pgrp, ushort sig, int priv)
 	if (pgrp < 0)
 		return EINTERNAL;
 
-	// if (sig >= NSIG)
-	if (sig < 0 || sig >= NSIG)
+	if (sig >= NSIG)
 		return EINVAL;
 
 	for (p = proclist; p; p = p->gl_next)
@@ -139,7 +138,7 @@ killgroup (int pgrp, ushort sig, int priv)
 }
 
 /*
- * post_sig: post a signal as being pending. It is assumed that the
+ * POST_SIG: post a signal as being pending. It is assumed that the
  * caller has already verified that "sig" is a valid signal, and
  * moreover it is the caller's responsibility to call check_sigs()
  * if it's possible that p == curproc
@@ -150,15 +149,6 @@ post_sig (PROC *p, ushort sig)
 	unsigned long sigm;
 	/* Thread signal handling support */
 	int delivered = 0;
-
-	/* CRITICAL: NEVER post signal 0 */
-	if (sig == 0) {
-		// ALERT("KERNEL BUG: post_sig called with sig=0");
-		/* This should never happen - kill/ikill filter sig=0 */
-		/* Clear bit 0 if somehow set */
-		p->sigpending &= ~1UL;
-		return;
-	}
 
 	/* just to be sure */
 	assert(sig < NSIG);
@@ -216,15 +206,21 @@ post_sig (PROC *p, ushort sig)
 	sigm = (1L << (unsigned long) sig);
 	
 	/* Check for thread-specific signal handling */
-	if (p->p_sigacts && p->p_sigacts->thread_signals && p->current_thread && p->current_thread->tid > 0) {
-		/* Skip thread-specific handling for thread0 */
+	if (p->p_sigacts && p->p_sigacts->thread_signals && 
+		p->num_threads > 1 &&
+		p->current_thread && p->current_thread->tid > 0 && 
+		((sig) == SIGUSR1 || (sig) == SIGUSR2)) {
+		TRACE_THREAD("POST_SIG: Trying thread-aware delivery (sig=%d, tid=%d)", 
+		             sig, p->current_thread->tid);
 		/* Try thread-aware signal delivery */
 		if (proc_thread_signal_aware_raise(p, sig) == 0) {
 			delivered = 1;
+			TRACE_THREAD("POST_SIG: Thread delivery succeeded");
 		}
 		/* If signal was delivered to a thread, check if we need to wake up any threads */
 		if (delivered && p->current_thread) {
 			/* Dispatch signals to current thread */
+			TRACE_THREAD("POST_SIG: Signal %d delivered to thread %d, dispatching signals / Calling dispatch_thread_signals()", sig, p->current_thread->tid);
 			dispatch_thread_signals(p->current_thread);
 		}
 	}
@@ -240,8 +236,9 @@ post_sig (PROC *p, ushort sig)
 	 * that p->p_sigmask is always valid. SIGCONT is among the unmaskable
 	 * signals
 	 */
-	if ((p->p_sigmask & sigm) != 0)
+	if ((p->p_sigmask & sigm) != 0){
 		return;
+	}
 
 	/* otherwise, make sure the process is awake */
 	{
@@ -266,8 +263,7 @@ ikill (int pid, ushort sig)
 	PROC *p;
 	long r;
 
-	// if (sig >= NSIG)
-	if (sig < 0 || sig >= NSIG)
+	if (sig >= NSIG)
 		return EBADARG;
 
 	if (pid < 0)
@@ -307,20 +303,23 @@ check_sigs (void)
 
 	if (p->pid == 0)
 		return;
-		
-	/* Check for thread-specific signals if we have a current thread */
-	if (p->p_sigacts && p->p_sigacts->thread_signals && p->current_thread 
-		&&  p->current_thread->tid > 0
-	) {
+
+    /* If the process is a classic process (TID <= 0) and currently 
+     * waiting in sigwaitinfo, do not dispatch signals here.
+     * The sigwaitinfo system call will consume them upon waking. */
+    if (p->p_flag & P_FLAG_SIGWAIT) {
+        return;
+    }
+
+	if (p->p_sigacts && p->p_sigacts->thread_signals && p->current_thread && p->current_thread->tid > 0) {
 		dispatch_thread_signals(p->current_thread);
-		return;
+		/* Continue to process-level signals after thread dispatch */
 	}
 top:
 	assert (p->p_sigacts);
 	
-	/* CRITICAL: Clear bit 0 if somehow set */
-	p->sigpending &= ~1UL;
 	sigs = p->sigpending;
+
 	/* Always notify the tracer about signals sent */
 	if (!p->ptracer)
 		sigs &= ~(p->p_sigmask);
@@ -331,9 +330,8 @@ top:
 
 		/* with tracing we need a mechanism to allow a signal to be
 		 * delivered to the child (curproc)
-		 * CRITICAL: Old code used signal 0 bit for Fcntl(...TRACEGO...)
-		 * to indicate that we should really deliver the signal - this is
-		 * now disabled
+		 * Code uses signal 0 bit for Fcntl(...TRACEGO...)
+		 * to indicate that we should really deliver the signal
 		 */
 		deliversig = 0;
 
@@ -402,11 +400,6 @@ top:
 void _cdecl
 raise (ushort sig)
 {
-	/* CRITICAL: Never raise signal 0 */
-	if (sig == 0) {
-		// ALERT("KERNEL BUG: raise called with sig=0");
-		return;
-	}	
 	post_sig (get_curproc(), sig);
 	check_sigs ();
 }
@@ -419,12 +412,8 @@ handle_sig (ushort sig)
 {
 	/* just to be sure */
 	assert (sig < NSIG);
-	/* CRITICAL: Never handle signal 0 */
-	if (sig == 0) {
-		// ALERT("KERNEL BUG: handle_sig called with sig=0");
-		return;
-	}	
 	assert (get_curproc()->p_sigacts);
+
 	/* notify proc extensions */
 	proc_ext_on_signal(get_curproc(), sig);
 
@@ -520,7 +509,6 @@ _default:
 	}
 	else
 	{
-		TRACE_THREAD("Handling signal %d", sig);
 		if (sendsig (sig))
 			goto _default;
 	}
