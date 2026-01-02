@@ -61,18 +61,12 @@ int wake_threads_by_time(struct proc *p, unsigned long current_time) {
         return 0;
     }
     
-    /* Union for tracking first thread at each priority */
-    union {
-        struct { struct thread *thread[17]; struct thread **prev[17]; } sep;
-        void *all[34];
-    } track;
+    /* Track highest priority wakeable thread */
+    struct thread *highest_thread = NULL;
+    struct thread **highest_prev = NULL;
+    int highest_pri = -1;
     
-    register int i = 34;
-    while (--i >= 0) track.all[i] = NULL;
-    
-    unsigned short wakeable_bitmap = 0;
-    
-    /* SINGLE PASS: Build bitmap + track threads */
+    /* Scan for highest priority thread that should wake */
     struct thread **tp = &p->sleep_queue;
     while (*tp) {
         struct thread *t = *tp;
@@ -85,60 +79,51 @@ int wake_threads_by_time(struct proc *p, unsigned long current_time) {
             ((t->wakeup_time > 0 && t->wakeup_time <= current_time) || 
              (t->t_sigpending & ~THREAD_SIGMASK(t)))) {
             
-            unsigned char pri = t->priority;
-            wakeable_bitmap |= (1 << pri);
-            
-            /* Track first thread at this priority */
-            if (!track.sep.thread[pri]) {
-                track.sep.thread[pri] = t;
-                track.sep.prev[pri] = tp;
+            /* Track thread with highest priority */
+            if (t->priority > highest_pri) {
+                highest_pri = t->priority;
+                highest_thread = t;
+                highest_prev = tp;
             }
         }
         tp = &t->next_sleeping;
     }
     
-    if (!wakeable_bitmap) {
+    if (!highest_thread) {
         return 0;
     }
     
-    TRACE_THREAD("SLEEP: Wakeable bitmap: 0x%04x", wakeable_bitmap);
+    TRACE_THREAD("SLEEP: Wakeable thread %d at priority %d", 
+                 highest_thread->tid, highest_pri);
     
     /* Wake threads in priority order - NO NESTED LOOPS */
     int woken = 0;
-    while (wakeable_bitmap) {
-        int highest_pri = find_highest_priority_bit_word(wakeable_bitmap);
-        wakeable_bitmap &= ~(1 << highest_pri); /* Clear this priority */
-        
-        /* Wake the first thread we tracked at this priority */
-        struct thread *t = track.sep.thread[highest_pri];
-        if (t && t->magic == CTXT_MAGIC) {
-            /* Check for cancellation before waking */
-            if (t->cancel_pending && t->cancel_state == PTHREAD_CANCEL_ENABLE) {
-                check_thread_cancellation(t);
-                continue;
-            }
-            
-            /* Remove from sleep queue using tracked pointer */
-            if (track.sep.prev[highest_pri]) {
-                *track.sep.prev[highest_pri] = t->next_sleeping;
-                t->next_sleeping = NULL;
-                t->in_sleep_queue = 0; /* O(1) flag */
-            }
-            
-            /* Boost priority */
-            if(!(t->t_sigpending & ~THREAD_SIGMASK(t))) {
-                boost_thread_priority(t, 5);
-            }
-            
-            /* Update state */
-            t->wait_type &= ~WAIT_SLEEP;
-            t->wakeup_time = 0;
-            atomic_thread_state_change(t, THREAD_STATE_READY);
-            add_to_ready_queue(t);
-            woken++;
-            
-            TRACE_THREAD("SLEEP: Woke thread %d (pri %d)", t->tid, t->priority);
+    struct thread *t = highest_thread;
+    
+    /* Check for cancellation before waking */
+    if (t->cancel_pending && t->cancel_state == PTHREAD_CANCEL_ENABLE) {
+        check_thread_cancellation(t);
+    } else {
+        /* Remove from sleep queue using tracked pointer */
+        if (highest_prev) {
+            *highest_prev = t->next_sleeping;
+            t->next_sleeping = NULL;
+            t->in_sleep_queue = 0; /* O(1) flag */
         }
+        
+        /* Boost priority */
+        if(!(t->t_sigpending & ~THREAD_SIGMASK(t))) {
+            boost_thread_priority(t, 5);
+        }
+        
+        /* Update state */
+        t->wait_type &= ~WAIT_SLEEP;
+        t->wakeup_time = 0;
+        proc_thread_state_change(t, THREAD_STATE_READY);
+        add_to_ready_queue(t);
+        woken++;
+        
+        TRACE_THREAD("SLEEP: Woke thread %d (pri %d)", t->tid, t->priority);        
     }
     
     return woken;
@@ -188,7 +173,7 @@ void proc_thread_sleep_wakeup_handler(PROC *p, long arg) {
     t->wakeup_time = 0;
     t->sleep_timeout = NULL;
     remove_from_sleep_queue(p, t);
-    atomic_thread_state_change(t, THREAD_STATE_READY);
+    proc_thread_state_change(t, THREAD_STATE_READY);
     add_to_ready_queue(t);
     
     proc_thread_schedule();
@@ -271,7 +256,7 @@ long proc_thread_sleep(long ms) {
 
         TRACE_THREAD_SLEEP(t, ms, ticks, t->wakeup_time);
         
-        atomic_thread_state_change(t, THREAD_STATE_BLOCKED);
+        proc_thread_state_change(t, THREAD_STATE_BLOCKED);
         t->wait_type |= WAIT_SLEEP;  /* Set wait type */
 
         remove_from_ready_queue(t);
@@ -306,7 +291,7 @@ long proc_thread_sleep(long ms) {
         /* Ensure we're in the RUNNING state */
         if (t->state != THREAD_STATE_RUNNING) {
             TRACE_THREAD("SLEEP: Thread %d not in RUNNING state after wake, fixing", t->tid);
-            atomic_thread_state_change(t, THREAD_STATE_RUNNING);
+            proc_thread_state_change(t, THREAD_STATE_RUNNING);
         }
 
         TRACE_THREAD_WAKEUP(t);
@@ -342,7 +327,8 @@ long proc_thread_yield(void) {
     unsigned long elapsed = now - t->last_scheduled;
     
     /* Get next thread ONCE and cache it */
-    struct thread *next = get_highest_priority_thread(p);
+    struct thread *next = get_highest_priority_thread_excluding(p, t);
+    TRACE_THREAD("YIELD: Thread %d yielding to thread %s - tid %d", t->tid, next ? "found" : "none", next ? next->tid : -1);
     if (!next || next == t) {
         TRACE_THREAD("YIELD: No other threads to yield to", t->tid);
         yield();
@@ -359,7 +345,7 @@ long proc_thread_yield(void) {
     if (t->policy == SCHED_FIFO || t->policy == SCHED_RR) {
         /* Only yield if in RUNNING state */
         if (t->state == THREAD_STATE_RUNNING) {
-            atomic_thread_state_change(t, THREAD_STATE_READY);
+            proc_thread_state_change(t, THREAD_STATE_READY);
             add_to_ready_queue(t);
             proc_thread_schedule();
             return 0;

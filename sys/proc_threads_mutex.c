@@ -54,7 +54,7 @@ static void handle_priority_ceiling(struct mutex *mutex, struct thread *t, int a
         TRACE_THREAD("PRI-CEILING: Thread %d priority restored to %d", 
                     t->tid, mutex->saved_priority);
     }
-    
+    return;
 }
 
 // Function to initialize a mutex
@@ -82,6 +82,8 @@ int thread_mutex_init(struct mutex *mutex, const struct mutex_attr *attr) {
             mutex->prioceiling = (int)MAX(scale_thread_priority(-curproc->pri), 1);  // Default to process's priority if no current thread
         }
     }
+    TRACE_THREAD("MUTEX INIT: Initialized mutex %p with type %d, protocol %d, prioceiling %d", 
+                 mutex, mutex->type, mutex->protocol, mutex->prioceiling);
     return THREAD_SUCCESS;
 }
 
@@ -93,15 +95,15 @@ int thread_mutex_lock(struct mutex *mutex) {
 
     struct thread *t = CURTHREAD;
     if (!t) {
-        TRACE_THREAD("THREAD_MUTEX_LOCK: current thread is NULL");
+        TRACE_THREAD("THREAD_MUTEX_LOCK: No current thread");
         return EINVAL;
     }
 
-    register unsigned short sr = splhigh();
+    // register unsigned short sr = splhigh();
 
-    TRACE_THREAD("MUTEX: Thread %d attempting to lock mutex %p (owner=%d)", 
-                 t->tid, mutex, 
-                 mutex->owner ? mutex->owner->tid : -1);
+    // TRACE_THREAD("MUTEX: Thread %d attempting to lock mutex %p (owner=%d)", 
+    //              t->tid, mutex, 
+    //              mutex->owner ? mutex->owner->tid : -1);
 
     /* Check if mutex is free */
     if (mutex->locked == 0) {
@@ -111,38 +113,38 @@ int thread_mutex_lock(struct mutex *mutex) {
             
         /* Apply priority ceiling if needed */
         handle_priority_ceiling(mutex, t, 1);
-        TRACE_THREAD("MUTEX LOCK: Thread %d acquired mutex %p, mutex owner pointer is now %p", t->tid, mutex, mutex->owner);
-        spl(sr);
+        // TRACE_THREAD("MUTEX LOCK: Thread %d acquired mutex %p, mutex owner pointer is now %p", t->tid, mutex, mutex->owner);
+        // spl(sr);
         return THREAD_SUCCESS;
     }
 
-    TRACE_THREAD("MUTEX LOCK: Mutex %p locked count is %d", mutex, mutex->lock_count);
+    // TRACE_THREAD("MUTEX LOCK: Mutex %p locked count is %d", mutex, mutex->lock_count);
 
     /* Check for recursive locking */
     if (mutex->owner == t) {
         switch (mutex->type) {
             case PTHREAD_MUTEX_RECURSIVE:
-                TRACE_THREAD("MUTEX LOCK: Thread %d re-acquired recursive lock", t->tid);
+                // TRACE_THREAD("MUTEX LOCK: Thread %d re-acquired recursive lock", t->tid);
                 mutex->lock_count++;
-                spl(sr);
+                // spl(sr);
                 return THREAD_SUCCESS;
                 
             case PTHREAD_MUTEX_ERRORCHECK:
                 TRACE_THREAD("MUTEX LOCK: Thread %d tried to re-lock mutex %p", t->tid, mutex);
-                spl(sr);
+                // spl(sr);
                 return EDEADLK;
                 
             default: /* PTHREAD_MUTEX_NORMAL */
                 TRACE_THREAD("MUTEX LOCK: Thread %d tried to re-lock normal mutex %p", t->tid, mutex);
-                spl(sr);
+                // spl(sr);
                 return EDEADLK;
         }
     }
 
     /* Prevent nested blocking */
     if (t->wait_type != WAIT_NONE) {
-        TRACE_THREAD("MUTEX LOCK: Thread %d already blocked", t->tid);
-        spl(sr);
+        // TRACE_THREAD("MUTEX LOCK: Thread %d already blocked", t->tid);
+        // spl(sr);
         return EDEADLK;
     }
 
@@ -160,14 +162,14 @@ int thread_mutex_lock(struct mutex *mutex) {
     t->next_wait = *pp;
     *pp = t;
     
-    TRACE_THREAD("THREAD_MUTEX_LOCK: Block thread %d", t->tid);
-    atomic_thread_state_change(t, THREAD_STATE_BLOCKED);
+    // TRACE_THREAD("THREAD_MUTEX_LOCK: Block thread %d", t->tid);
+    proc_thread_state_change(t, THREAD_STATE_BLOCKED);
     
     /* Priority inheritance - boost the priority of the mutex owner */
     if (mutex->owner && mutex->owner->priority < t->priority) {
-        TRACE_THREAD("PRI-INHERIT: Thread %d (pri %d) -> owner %d (pri %d)",
-                    t->tid, t->priority,
-                    mutex->owner->tid, mutex->owner->priority);
+        // TRACE_THREAD("PRI-INHERIT: Thread %d (pri %d) -> owner %d (pri %d)",
+        //             t->tid, t->priority,
+        //             mutex->owner->tid, mutex->owner->priority);
         
         /* Boost owner's priority to the waiting thread's priority */
         boost_thread_priority(mutex->owner, t->priority - mutex->owner->priority);
@@ -179,13 +181,14 @@ int thread_mutex_lock(struct mutex *mutex) {
         }
     }
 
-    spl(sr);
+    // spl(sr);
     
     /* Yield CPU - will resume here when woken */
+    TRACE_THREAD("THREAD_MUTEX_LOCK: Yielding CPU, calling SCHEDULER");
     proc_thread_schedule();
     
     /* When we resume, check if we were sleeping */
-    sr = splhigh();
+    // sr = splhigh();
     if (t->wakeup_time > 0) {
         TRACE_THREAD("THREAD_MUTEX_LOCK: Thread %d was sleeping, clearing sleep state", t->tid);
         t->wakeup_time = 0;
@@ -200,7 +203,7 @@ int thread_mutex_lock(struct mutex *mutex) {
         mutex->lock_count = 1;
     }
     
-    spl(sr);
+    // spl(sr);
     return THREAD_SUCCESS;
 
 }
@@ -212,25 +215,27 @@ int thread_mutex_unlock(struct mutex *mutex) {
     
     struct thread *current = CURTHREAD;
     if (!current) {
+        TRACE_THREAD("THREAD_MUTEX_UNLOCK: No current thread");
         return EINVAL;
     }
     
-    register unsigned short sr = splhigh();
+    register unsigned short sr;
+    // register unsigned short sr = splhigh();
     
     /* Check if current thread owns the mutex */
     if (mutex->owner != current) {
         TRACE_THREAD("THREAD_MUTEX_UNLOCK: Thread %d is not the owner (owner=%d)", 
                     current->tid, mutex->owner ? mutex->owner->tid : -1);
-        spl(sr);
+        // spl(sr);
         return (mutex->type == PTHREAD_MUTEX_ERRORCHECK) ? EPERM : EPERM;
     }
     
     /* Handle recursive unlocking */
     if (mutex->type == PTHREAD_MUTEX_RECURSIVE && mutex->lock_count > 1) {
-        TRACE_THREAD("THREAD_MUTEX_UNLOCK: Thread %d releasing recursive lock (count=%d)", 
-                    current->tid, mutex->lock_count);
+        // TRACE_THREAD("THREAD_MUTEX_UNLOCK: Thread %d releasing recursive lock (count=%d)", 
+        //             current->tid, mutex->lock_count);
         mutex->lock_count--;
-        spl(sr);
+        // spl(sr);
         return THREAD_SUCCESS;
     }    
     
@@ -272,7 +277,7 @@ int thread_mutex_unlock(struct mutex *mutex) {
             }
             
             /* Mark as ready and add to ready queue */
-            atomic_thread_state_change(highest, THREAD_STATE_READY);
+            proc_thread_state_change(highest, THREAD_STATE_READY);
             add_to_ready_queue(highest);
 
             /* Restore original priority if boosted */
@@ -280,27 +285,30 @@ int thread_mutex_unlock(struct mutex *mutex) {
             
             /* Force immediate scheduling if higher priority */
             if (highest->priority > current->priority) {
-                TRACE_THREAD("THREAD_MUTEX_UNLOCK: Forcing immediate schedule due to priority");
-                spl(sr);
+                TRACE_THREAD("THREAD_MUTEX_UNLOCK: Forcing immediate SCHEDULE due to priority, calling SCHEDULER");
+                // spl(sr);
                 proc_thread_schedule();
                 return THREAD_SUCCESS;
             }
             
-            spl(sr);
+            // spl(sr);
             return THREAD_SUCCESS;
         }
     }
     
     /* No waiters, release the mutex */
-    TRACE_THREAD_MUTEX("unlocking", current, mutex);
+    // TRACE_THREAD_MUTEX("unlocking", current, mutex);
+    sr = splhigh();
     mutex->locked = 0;
     mutex->owner = NULL;
     mutex->lock_count = 0;
-    
+    spl(sr);
+
     /* Restore original priority if boosted */
     reset_thread_priority(current);
     
-    spl(sr);
+
+    // TRACE_THREAD("THREAD_MUTEX_UNLOCK: Thread %d released mutex %p", current->tid, mutex);
     return THREAD_SUCCESS;
 }
 
@@ -314,10 +322,11 @@ int thread_mutex_trylock(struct mutex *mutex) {
 
     struct thread *t = CURTHREAD;
     if (!t) {
+        TRACE_THREAD("THREAD_MUTEX_TRYLOCK: No current thread");
         return EINVAL;
     }
 
-    register unsigned short sr = splhigh();
+    // register unsigned short sr = splhigh();
 
     /* Check if mutex is free */
     if (mutex->locked == 0) {
@@ -328,7 +337,7 @@ int thread_mutex_trylock(struct mutex *mutex) {
         /* Apply priority ceiling if needed */
         handle_priority_ceiling(mutex, t, 1);
         
-        spl(sr);
+        // spl(sr);
         return THREAD_SUCCESS;
     }
     
@@ -338,23 +347,23 @@ int thread_mutex_trylock(struct mutex *mutex) {
             case PTHREAD_MUTEX_RECURSIVE:
                 TRACE_THREAD("MUTEX TRYLOCK: Thread %d re-acquired recursive lock", t->tid);
                 mutex->lock_count++;
-                spl(sr);
+                // spl(sr);
                 return THREAD_SUCCESS;
                 
             case PTHREAD_MUTEX_ERRORCHECK:
                 TRACE_THREAD("MUTEX TRYLOCK: Thread %d tried to re-lock mutex %p", t->tid, mutex);
-                spl(sr);
+                // spl(sr);
                 return EDEADLK;
                 
             default: /* PTHREAD_MUTEX_NORMAL */
                 TRACE_THREAD("MUTEX TRYLOCK: Thread %d tried to re-lock normal mutex %p", t->tid, mutex);
-                spl(sr);
+                // spl(sr);
                 return EDEADLK;
         }
     }
     
     /* Mutex is locked by someone else */
-    spl(sr);
+    // spl(sr);
     return EBUSY;
 }
 
@@ -369,24 +378,84 @@ int thread_mutexattr_destroy(struct mutex_attr *attr) {
 /**
  * Destroy a mutex
  */
+/**
+ * Destroy a mutex - POSIX compliant
+ */
 int thread_mutex_destroy(struct mutex *mutex) {
     if (!mutex) {
         return EINVAL;
     }
 
-    register unsigned short sr = splhigh();
-
-    // Check if mutex is locked or has waiters
-    if (mutex->locked || mutex->wait_queue) {
-        TRACE_THREAD("MUTEX DESTROY: mutex=%p is locked or has waiters", mutex);
-        spl(sr);
+    // register unsigned short sr = splhigh();
+    
+    /* POSIX: Destroying a locked mutex is undefined behavior.
+     * Some implementations return EBUSY, some do nothing.
+     * We'll follow the common Linux behavior: return EBUSY if locked.
+     */
+    if (mutex->locked) {
+        TRACE_THREAD("MUTEX DESTROY: mutex=%p is locked (owner=%d) - POSIX says undefined",
+                     mutex, mutex->owner ? mutex->owner->tid : -1);
+        
+        /* Check if it's a recursive mutex locked by current thread */
+        struct thread *current = CURTHREAD;
+        if (mutex->type == PTHREAD_MUTEX_RECURSIVE && 
+            mutex->owner == current) {
+            /* For recursive mutex owned by current thread, 
+             * we can safely destroy it by unlocking all levels */
+            TRACE_THREAD("MUTEX DESTROY: Unlocking recursive mutex %p (count=%d)",
+                         mutex, mutex->lock_count);
+            
+            // Unlock all recursive levels
+            while (mutex->lock_count > 0) {
+                mutex->lock_count--;
+            }
+            mutex->locked = 0;
+            mutex->owner = NULL;
+            
+            // Continue with destroy...
+        } else {
+            /* Standard case: return EBUSY (common but not required by POSIX) */
+            // spl(sr);
+            return EBUSY;
+        }
+    }
+    
+    /* Check for waiters - destroying with waiters is also undefined */
+    if (mutex->wait_queue) {
+        TRACE_THREAD("MUTEX DESTROY: mutex=%p has waiters - POSIX says undefined",
+                     mutex);
+        
+        /* We could wake all waiters with EINVAL, but that's not required */
+        // spl(sr);
         return EBUSY;
     }
-
-    // Reset mutex state
-    mutex->locked = 0;
-    mutex->owner = NULL;
-    mutex->lock_count = 0;
-    spl(sr);
+    
+    /* Safe to destroy - clear all fields */
+    TRACE_THREAD("MUTEX DESTROY: Successfully destroying mutex %p", mutex);
+    mint_bzero(mutex, sizeof(struct mutex));
+    
+    // spl(sr);
     return THREAD_SUCCESS;
 }
+
+// int thread_mutex_destroy(struct mutex *mutex) {
+//     if (!mutex) {
+//         return EINVAL;
+//     }
+
+//     register unsigned short sr = splhigh();
+
+//     // Check if mutex is locked or has waiters
+//     if (mutex->locked || mutex->wait_queue) {
+//         TRACE_THREAD("MUTEX DESTROY: mutex=%p is locked or has waiters", mutex);
+//         spl(sr);
+//         return EBUSY;
+//     }
+
+//     // Reset mutex state
+//     mutex->locked = 0;
+//     mutex->owner = NULL;
+//     mutex->lock_count = 0;
+//     spl(sr);
+//     return THREAD_SUCCESS;
+// }

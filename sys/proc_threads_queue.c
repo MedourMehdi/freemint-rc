@@ -38,7 +38,7 @@ void add_to_ready_queue(struct thread *t) {
     p = t->proc;
     
     /* Set state BEFORE checking queue membership */
-    atomic_thread_state_change(t, THREAD_STATE_READY);
+    proc_thread_state_change(t, THREAD_STATE_READY);
     
     sr = splhigh();
 
@@ -79,13 +79,16 @@ void add_to_ready_queue(struct thread *t) {
         while (*pp && (*pp)->priority == t->priority && (*pp)->tid < t->tid) {
             pp = &(*pp)->next_ready;
         }
-        
+        TRACE_THREAD("READY_Q: Inserting thread %d before thread %d", 
+                    t->tid, *pp ? (*pp)->tid : -1);
         /* Insert at the right position */
         t->next_ready = *pp;
         *pp = t;
     }
     /* Default: add to end of queue */
     else {
+        TRACE_THREAD("READY_Q: Thread %d normal priority %d, adding to end", 
+                    t->tid, t->priority);
         struct thread *last = p->ready_queue;
         while (last->next_ready) {
             last = last->next_ready;
@@ -106,6 +109,7 @@ void remove_from_ready_queue(struct thread *t) {
     register unsigned short sr = splhigh();
 
     if (!p->ready_queue) {
+        TRACE_THREAD("READY_Q: Ready queue empty, cannot remove thread %d", t->tid);
         spl(sr);
         return;
     }
@@ -143,10 +147,9 @@ void remove_from_ready_queue(struct thread *t) {
 void remove_from_sleep_queue(struct proc *p, struct thread *t) {
     if (!p || !t) return;
     
-    register unsigned short sr = splhigh();
-    
     struct thread **pp = &p->sleep_queue;
-    
+    register unsigned short sr = splhigh();
+
     while (*pp) {
         if (*pp == t) {
             *pp = t->next_sleeping;
@@ -347,49 +350,33 @@ struct thread *find_highest_priority_thread_in_queue(struct thread *queue,
         return NULL;
     }
     
-    /* Zero-initialized union - compiler optimized */
-    union {
-        struct { struct thread *thread[17]; struct thread *prev[17]; } sep;
-        void *all[34];
-    } track;
+    /* Track highest priority thread found */
+    struct thread *best_thread = NULL;
+    struct thread *best_prev = NULL;
+    int best_priority = -1;
     
-    /* Fast initialization */
-    register int i = 34;
-    while (--i >= 0) track.all[i] = NULL;
-    
-    unsigned short wait_bitmap = 0;
     struct thread *t = queue;
     struct thread *prev = NULL;
     
-    /* Single pass: build bitmap and track positions */
+    /* Single pass: find highest priority thread directly */
     while (t) {
-        /* Validate thread and guard against corrupted priority */
+        /* Validate thread */
         if (t->magic == CTXT_MAGIC && 
             !(t->state & THREAD_STATE_EXITED) && 
             t->priority < 17) {
             
-            unsigned char pri_idx = t->priority;
-            wait_bitmap |= (1 << pri_idx);
-            
-            /* Track first thread at each priority level */
-            if (!track.sep.thread[pri_idx]) {
-                track.sep.thread[pri_idx] = t;
-                track.sep.prev[pri_idx] = prev;
+            /* Track thread with highest priority (first wins ties) */
+            if (t->priority > best_priority) {
+                best_priority = t->priority;
+                best_thread = t;
+                best_prev = prev;
             }
         }
         prev = t;
-        t = t->next_wait;
+        t = t->next_wait;        
     }
     
-    /* Return using pre-tracked pointers */
-    if (wait_bitmap) {
-        int highest_pri = find_highest_priority_bit_word(wait_bitmap);
-        if (highest_pri != 0x80 && highest_pri < 17) {
-            *prev_highest = track.sep.prev[highest_pri];
-            return track.sep.thread[highest_pri];
-        }
-    }
-    
-    *prev_highest = NULL;
-    return NULL;
+    /* Return results */
+    *prev_highest = best_prev;
+    return best_thread;
 }

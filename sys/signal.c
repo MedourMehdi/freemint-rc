@@ -312,8 +312,10 @@ check_sigs (void)
     }
 
 	if (p->p_sigacts && p->p_sigacts->thread_signals && p->current_thread && p->current_thread->tid > 0) {
+		TRACE_THREAD("CHECK SIGS: Dispatching thread-specific signals for thread %d", p->current_thread->tid);
 		dispatch_thread_signals(p->current_thread);
 		/* Continue to process-level signals after thread dispatch */
+		TRACE_THREAD("CHECK SIGS: Continuing to process-level signal handling after thread dispatch");
 	}
 top:
 	assert (p->p_sigacts);
@@ -371,7 +373,7 @@ top:
 					{
 						p->p_sigmask |= sigm;
 					}
-					TRACE_THREAD("CHECK SIGS: handling signal %d", i);
+					// TRACE_THREAD("CHECK SIGS: handling signal %d", i);
 					handle_sig (i);
 
 /*

@@ -46,7 +46,7 @@ static int get_rr_interval(struct thread *t, long *interval)
  */
 static int set_thread_policy(struct thread *t, enum sched_policy policy, int priority)
 {
-    if (!t || t->magic != CTXT_MAGIC)
+    if (!t || t->magic != CTXT_MAGIC || (t->state & THREAD_STATE_EXITED))
         return EINVAL;
 
     /* Validate process pointer */
@@ -73,6 +73,7 @@ static int set_thread_policy(struct thread *t, enum sched_policy policy, int pri
 
     if (!t->priority_boost) {
         t->original_priority = priority;
+        reset_thread_cpu_time(t);  /* Reset penalty on manual changes */
     }
 
     /* Update timeslice based on new policy */
@@ -89,6 +90,10 @@ static int set_thread_policy(struct thread *t, enum sched_policy policy, int pri
 
     /* Handle priority change according to POSIX rules */
     if (was_running || was_in_ready_queue) {
+
+        /* Reset CPU time on manual priority adjustment */
+        reset_thread_cpu_time(t);
+          
         /* Remove from ready queue if present */
         if (was_in_ready_queue) {
             remove_from_ready_queue(t);
@@ -122,7 +127,7 @@ static int set_thread_policy(struct thread *t, enum sched_policy policy, int pri
             
             if (should_preempt) {
                 /* Add current thread to ready queue and trigger reschedule */
-                atomic_thread_state_change(t, THREAD_STATE_READY);
+                proc_thread_state_change(t, THREAD_STATE_READY);
                 add_to_ready_queue(t);
                 spl(sr);  /* Release lock before scheduling */
                 proc_thread_schedule();

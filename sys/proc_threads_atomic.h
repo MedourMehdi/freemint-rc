@@ -30,19 +30,19 @@
  * Try to acquire lock using TAS instruction
  * @return 1 if lock acquired, 0 if already locked
  */
-int tas_try_lock(volatile unsigned char *lock_byte);
+int tas_try_lock(volatile unsigned short *lock_word);
 
 /**
  * Release TAS lock
  */
-void tas_unlock(volatile unsigned char *lock_byte);
+void tas_unlock(volatile unsigned short *lock_word);
 
 /**
  * Check if TAS lock is held (non-blocking read)
  * @return Non-zero if locked, 0 if free
  */
-static inline int tas_is_locked(volatile unsigned char *lock_byte) {
-    return *lock_byte;
+static inline int tas_is_locked(volatile unsigned short *lock_word) {
+    return *lock_word;
 }
 
 /* ============================================================================
@@ -70,9 +70,8 @@ int thread_atomic_list_remove(struct thread **head, struct thread *thread_to_rem
  * Adds ownership tracking for debugging
  */
 typedef struct {
-    volatile unsigned char locked;    /* Byte for TAS instruction */
-    unsigned char padding;            /* Alignment padding */
-    int owner_tid;                    /* Debugging only */
+    volatile unsigned short locked;    /* Byte for TAS instruction */
+    short owner_tid;                    /* Debugging only */
 } spinlock_t;
 
 /**

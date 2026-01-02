@@ -93,7 +93,7 @@ static void thread_timeout_sighandler(PROC *p, long arg)
         t->wait_type &= ~WAIT_SIGNAL;
         
         // Add to ready queue
-        atomic_thread_state_change(t, THREAD_STATE_READY);
+        proc_thread_state_change(t, THREAD_STATE_READY);
         add_to_ready_queue(t);
     }
 
@@ -371,7 +371,7 @@ int deliver_signal_to_thread(struct proc *p, struct thread *t, int sig, const si
             remove_thread_from_specific_wait_queue(t, WAIT_SIGNAL);  
 
             /* Make thread ready to run */
-            atomic_thread_state_change(t, THREAD_STATE_READY);
+            proc_thread_state_change(t, THREAD_STATE_READY);
             if (!is_in_ready_queue(t)) {
                 add_to_ready_queue(t);
             }
@@ -429,7 +429,7 @@ int deliver_signal_to_thread(struct proc *p, struct thread *t, int sig, const si
     }
     /* Wake thread if blocked so handler can run */
     if (t->state & THREAD_STATE_BLOCKED) {
-        atomic_thread_state_change(t, THREAD_STATE_READY);
+        proc_thread_state_change(t, THREAD_STATE_READY);
         add_to_ready_queue(t);
     }
     return 1;
@@ -942,7 +942,7 @@ long _cdecl proc_thread_signal_sigwait(ulong mask, long timeout)
 
     /* Prepare to sleep */
     t->sig_wait_obj = (void*)mask;
-    atomic_thread_state_change(t, THREAD_STATE_BLOCKED);
+    proc_thread_state_change(t, THREAD_STATE_BLOCKED);
     t->wait_type |= WAIT_SIGNAL;
     t->sleep_reason = 0;
 
@@ -1067,7 +1067,8 @@ long _cdecl proc_thread_signal_sigblock(ulong mask)
     if ( t->tid == 0) {
         PROC_SIGMASK_ADD(t, mask);
     }
-
+    TRACE_THREAD("proc_thread_signal_sigblock: TID=%d, added mask=0x%lx, new_mask=0x%lx",
+                 t->tid, mask, THREAD_SIGMASK(t));
     return 0;
 }
 
@@ -1232,6 +1233,8 @@ void dispatch_thread_signals(struct thread *t)
     if (signals_handled > 0) {
         TRACE_THREAD("DISPATCH THREAD SIGNALS: INFO - Handled %d signal(s) for thread %d", signals_handled, t->tid);
     }
+    TRACE_THREAD("DISPATCH THREAD SIGNALS: INFO - Finished checking thread %d for pending signals", t->tid);
+    return;
 }
 
 /* Clean up signal stack if needed */

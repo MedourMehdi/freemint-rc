@@ -21,18 +21,20 @@
 #include "proc_threads.h"
 
 long sys_p_thread_getid(void);
-void atomic_thread_state_change(struct thread *t, int new_state);
+void proc_thread_state_change(struct thread *t, int new_state);
 struct thread *get_highest_priority_thread(struct proc *p);
+struct thread *get_highest_priority_thread_excluding(struct proc *p, struct thread *exclude);
 unsigned long get_system_ticks(void);
 void make_process_eligible(struct proc *p);
 void boost_thread_priority(struct thread *t, int boost_amount);
 void reset_thread_priority(struct thread *t);
 long timeout_remaining(TIMEOUT *t);
+void update_thread_cpu_time(struct thread *t);
+void reset_thread_cpu_time(struct thread *t);
 
 /* Lookup tables - must be extern for inline functions */
 extern const unsigned char priority_scale_table[100];
 
-inline int find_highest_priority_bit_word(unsigned short bitmap);
 inline int scale_thread_priority(int priority);
 
 struct thread *proc_thread_find(struct proc *p, short tid);

@@ -145,7 +145,7 @@ long _cdecl sys_p_thread_ctrl(long func, long arg1, long arg2) {
                 
                 // If target is sleeping/waiting, wake it up
                 if (target->state == THREAD_STATE_BLOCKED) {
-                    atomic_thread_state_change(target, THREAD_STATE_READY);
+                    proc_thread_state_change(target, THREAD_STATE_READY);
                     add_to_ready_queue(target);
                 }
                 
@@ -236,11 +236,11 @@ long _cdecl sys_p_thread_ctrl(long func, long arg1, long arg2) {
             register unsigned short sr = splhigh();
 
             // Prepare current thread for rescheduling
-            atomic_thread_state_change(current, THREAD_STATE_READY);
+            proc_thread_state_change(current, THREAD_STATE_READY);
             add_to_ready_queue(current);
 
             // Prepare main thread for execution
-            atomic_thread_state_change(main_thread, THREAD_STATE_RUNNING);
+            proc_thread_state_change(main_thread, THREAD_STATE_RUNNING);
             p->current_thread = main_thread;
 
             // Remove main thread from queues if present
@@ -288,11 +288,11 @@ long _cdecl sys_p_thread_ctrl(long func, long arg1, long arg2) {
 
             // Update states
             if (current->wait_type == WAIT_NONE) {
-                atomic_thread_state_change(current, THREAD_STATE_READY);
+                proc_thread_state_change(current, THREAD_STATE_READY);
                 add_to_ready_queue(current);
             }
             
-            atomic_thread_state_change(target, THREAD_STATE_RUNNING);
+            proc_thread_state_change(target, THREAD_STATE_RUNNING);
             // p->current_thread = target;  --- IGNORE --- Handled by thread_switch()
             // target->last_scheduled = get_system_ticks(); --- IGNORE --- Handled in thread_switch()
 
@@ -304,7 +304,11 @@ long _cdecl sys_p_thread_ctrl(long func, long arg1, long arg2) {
         }
         case THREAD_CTRL_SIGRETURN:
             return proc_thread_sigreturn();
-        
+        case THREAD_CTRL_SETUP_THREADING:
+            if(handle_thread_mode_switching(curproc)) {
+                return 0;
+            }
+            return EAGAIN;
         default:
             TRACE_THREAD("ERROR: sys_p_thread_ctrl called with invalid func %d", func);
             return EINVAL;
@@ -530,7 +534,7 @@ long _cdecl sys_p_thread_sync(long operator, long arg1, long arg2) {
             return thread_semaphore_up((struct semaphore *)arg1);
             
         case THREAD_SYNC_MUTEX_LOCK:
-            TRACE_THREAD("THREAD_SYNC_MUTEX_LOCK");
+            // TRACE_THREAD("THREAD_SYNC_MUTEX_LOCK");
             return thread_mutex_lock((struct mutex *)arg1);
 
         case THREAD_SYNC_MUTEX_TRYLOCK:
@@ -538,7 +542,7 @@ long _cdecl sys_p_thread_sync(long operator, long arg1, long arg2) {
             return thread_mutex_trylock((struct mutex *)arg1);
 
         case THREAD_SYNC_MUTEX_UNLOCK:
-            TRACE_THREAD("THREAD_SYNC_MUTEX_UNLOCK");
+            // TRACE_THREAD("THREAD_SYNC_MUTEX_UNLOCK");
             return thread_mutex_unlock((struct mutex *)arg1);
             
         case THREAD_SYNC_MUTEX_INIT:
@@ -573,11 +577,11 @@ long _cdecl sys_p_thread_sync(long operator, long arg1, long arg2) {
                     return EINVAL;
                 }
                 
-                TRACE_THREAD("SETTYPE: attr=%p, setting type to %d", attr, type);
+                // TRACE_THREAD("SETTYPE: attr=%p, setting type to %d", attr, type);
                 
                 attr->type = type;
                 
-                TRACE_THREAD("SETTYPE: attr->type is now %d", attr->type);
+                // TRACE_THREAD("SETTYPE: attr->type is now %d", attr->type);
                 
                 return THREAD_SUCCESS;
             }
@@ -802,9 +806,16 @@ long _cdecl sys_p_pthread(long syscall_func, long arg1, long arg2, long arg3) {
             return !((volatile int *)arg1) ? EINVAL : atomic_xor((volatile int *)arg1, (int)arg2);
 
         case THREAD_ATOMIC_TAS:
-        TRACE_THREAD("THREAD_ATOMIC_TAS: arg1=%p", (void *)arg1);
-            return !((volatile unsigned char *)arg1) ? EINVAL : tas_try_lock((volatile unsigned char *)arg1);
-
+            // TRACE_THREAD("THREAD_ATOMIC_TAS: arg1=%p", (void *)arg1);
+            /* Validate pointer and alignment */
+            if (!arg1) {
+                return EINVAL;
+            }
+            if (arg1 & 1) {  /* Check for odd address */
+                TRACE_THREAD("THREAD_ATOMIC_TAS: Unaligned address %p", (void *)arg1);
+                return EINVAL;
+            }
+            return tas_try_lock((volatile unsigned short *)arg1);
         default:
             TRACE_THREAD("P_THREAD_UNKNOWN: %ld", syscall_func);
             return EINVAL;

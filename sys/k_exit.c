@@ -123,8 +123,8 @@ terminate(struct proc *pcurproc, short code, short que)
 			dlockproc[i] = NULL;
 	}
 
-	/* Clean up all threads associated with this process */
-	proc_thread_cleanup_process(pcurproc);
+	/* Clean up all threads associated with this process - Keeping thread id 0 */
+	if (curproc->p_flag & P_FLAG_THREADED)  proc_thread_cleanup_process(pcurproc);
 
 	/* Clean up signal queue */
 	cleanup_signal_queue(pcurproc);

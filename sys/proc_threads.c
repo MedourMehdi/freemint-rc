@@ -265,7 +265,7 @@ static long create_thread(struct proc *p, void *(*func)(void*), void *arg,
     init_thread_context(t, func, arg);
     
     /* Make thread ready to run */
-    atomic_thread_state_change(t, THREAD_STATE_READY);
+    proc_thread_state_change(t, THREAD_STATE_READY);
 
     if (!(p->p_flag & P_FLAG_THREADED)) {
         p->p_flag |= P_FLAG_THREADED;
@@ -295,8 +295,9 @@ static long create_thread(struct proc *p, void *(*func)(void*), void *arg,
 static void init_thread_context(struct thread *t, void *(*func)(void*), 
                                void *arg) {
     unsigned long usp, ssp;
-    
-    TRACE_THREAD("INIT CONTEXT: Initializing context for thread %d", t->tid);
+    unsigned long usp_size = ((unsigned long)t->stack_top - ((t->stack_size >> 1) - 256)); // Extra space for safety
+    unsigned long ssp_size = ((unsigned long)t->stack_top - (t->stack_size - 256)); // Extra space for safety
+    TRACE_THREAD("INIT CONTEXT: Initializing context for thread %d, stack_top - usp_size = %ld, ssp_size = %ld, ", t->tid, ((t->stack_size >> 1) - 256), (t->stack_size - 256));
     
     /* Clear contexts completely */
     mint_bzero(&t->ctxt[CURRENT], sizeof(t->ctxt[CURRENT]));
@@ -311,8 +312,10 @@ static void init_thread_context(struct thread *t, void *(*func)(void*),
     memcpy(&t->ctxt[SYSCALL], &t->proc->ctxt[SYSCALL], sizeof(CONTEXT));
 
     /* Set up stack pointers (aligned to 4-byte boundary for m68k) */
-    usp = ((unsigned long)t->stack_top - 512) & ~0x3UL;
-    ssp = ((unsigned long)t->stack_top - 1024) & ~0x3UL;
+    // usp = ((unsigned long)t->stack_top - 2048) & ~0x1UL;
+    // ssp = ((unsigned long)t->stack_top - 4096) & ~0x1UL;
+    usp = (usp_size) & ~0x1UL;
+    ssp = (ssp_size) & ~0x1UL;    
     
     /* Initialize CURRENT context (what thread will run with) */
     t->ctxt[CURRENT].ssp = ssp;
@@ -412,7 +415,7 @@ static void init_main_thread_context(struct proc *p) {
     THREAD_SIGMASK_SET(t0, p->p_sigmask);
 
     /* Mark thread as running */
-    atomic_thread_state_change(t0, THREAD_STATE_RUNNING);
+    proc_thread_state_change(t0, THREAD_STATE_RUNNING);
     
     TRACE_THREAD("INIT CONTEXT: Thread0 initialized for process %d", p->pid);
     TRACE_THREAD(" CURRENT: ssp=%lx, usp=%lx, pc=%lx", 
@@ -422,9 +425,33 @@ static void init_main_thread_context(struct proc *p) {
                  t0->ctxt[SYSCALL].ssp, t0->ctxt[SYSCALL].usp, 
                  t0->ctxt[SYSCALL].pc);
     
-    /* Start thread timer for scheduling */
+    // /* Start thread timer for scheduling */
     TRACE_THREAD("INIT CONTEXT: Starting thread timer for process %d", p->pid);
     thread_timer_start(t0->proc, t0->tid);
+}
+
+/******************************************************************************/
+/* handle_thread_mode_switching - Handle mode switching for thread ops      */
+/******************************************************************************/
+struct thread *handle_thread_mode_switching(struct proc *p) {
+    if (!p->current_thread) {
+        TRACE_THREAD("HANDLE SWITCH TO THREADED MODE: current thread is NULL");
+        init_main_thread_context(curproc);
+        TRACE_THREAD("HANDLE SWITCH TO THREADED MODE: Initialized main thread context for process %d", p->pid);
+        p->p_flag &= ~P_FLAG_THREADED;
+        TRACE_THREAD("HANDLE SWITCH TO THREADED MODE: Cleared P_FLAG_THREADED for process %d", p->pid);
+        if (p->p_sigacts) {
+            /* Disable thread signals for forked child */
+            // p->p_sigacts->thread_signals = 0;
+            p->p_sigacts->flags &= ~SAS_THREADED;
+            TRACE_THREAD("HANDLE SWITCH TO THREADED MODE: Disabled thread signals in process PID %d", p->pid);
+        }
+        if(p->current_thread) {
+            return p->current_thread;
+        }
+        return NULL;
+    }
+    return p->current_thread;
 }
 
 /******************************************************************************/
@@ -467,11 +494,11 @@ void proc_thread_cleanup_process(struct proc *pcurproc) {
     
     if (!pcurproc->threads) return;
     
-    TRACE(("terminate: cleaning up threads for pid=%d", pcurproc->pid));
+    TRACE_THREAD("PROC THREAD CLEANUP PROCESS: cleaning up threads for pid=%d", pcurproc->pid);
 
     /* Step 1: Stop thread timer FIRST to prevent scheduling during cleanup */
     if (pcurproc->p_thread_timer.enabled) {
-        TRACE(("terminate: stopping thread timer"));
+        TRACE_THREAD("PROC THREAD CLEANUP PROCESS: stopping thread timer");
         thread_timer_stop(pcurproc);
     }
 
@@ -479,7 +506,7 @@ void proc_thread_cleanup_process(struct proc *pcurproc) {
     for (timelist = tlist; timelist; timelist = next_timelist) {
         next_timelist = timelist->next;
         if (timelist->proc == pcurproc) {
-            TRACE(("terminate: cancelling timeout for pid=%d", pcurproc->pid));
+            TRACE_THREAD("PROC THREAD CLEANUP PROCESS: cancelling timeout for pid=%d", pcurproc->pid);
             canceltimeout(timelist);
         }
     }
@@ -487,7 +514,7 @@ void proc_thread_cleanup_process(struct proc *pcurproc) {
     /* Step 3: Remove all threads from queues BEFORE clearing sync states */
     for (t = pcurproc->threads; t; t = t->next) {
         if (t->magic == CTXT_MAGIC) {
-            TRACE(("terminate: removing thread %d from queues", t->tid));
+            TRACE(("PROC THREAD CLEANUP PROCESS: removing thread %d from queues", t->tid));
             remove_thread_from_wait_queues(t);
             remove_from_ready_queue(t);
             /* Mark as exited but don't free yet */
@@ -497,13 +524,14 @@ void proc_thread_cleanup_process(struct proc *pcurproc) {
     
     /* Step 4: Clean up idle thread explicitly */
     if (pcurproc->idle_thread) {
-        TRACE(("terminate: cleaning up idle thread"));
+        TRACE(("PROC THREAD CLEANUP PROCESS: cleaning up idle thread"));
         cleanup_thread_resources(pcurproc, pcurproc->idle_thread, 
                                 pcurproc->idle_thread->tid);
         pcurproc->idle_thread = NULL;
     }
     
     /* Step 5: Clean up sync states (mutexes, semaphores, etc.) */
+    TRACE(("PROC THREAD CLEANUP PROCESS: cleaning up thread sync states"));
     cleanup_thread_sync_states(pcurproc);
 
     /* Step 6: Free individual thread resources */
@@ -511,7 +539,7 @@ void proc_thread_cleanup_process(struct proc *pcurproc) {
     while (t) {
         next = t->next;
         
-        if (t->magic == CTXT_MAGIC) {
+        if (t->magic == CTXT_MAGIC && t->tid != 0) {
             TRACE(("terminate: freeing thread %d resources", t->tid));
             cleanup_thread_resources(pcurproc, t, t->tid);
         }
@@ -520,12 +548,14 @@ void proc_thread_cleanup_process(struct proc *pcurproc) {
     }
 
     /* Step 7: Clean up process-wide thread state */
+    TRACE(("PROC THREAD CLEANUP PROCESS: clearing process thread state"));
     pcurproc->current_thread = NULL;
     pcurproc->num_threads = 0;
     pcurproc->total_threads = 0;
     pcurproc->threads = NULL;
 
     /* Step 8: Clean up process-wide TSD (last step) */
+    TRACE(("PROC THREAD CLEANUP PROCESS: cleaning up TSD"));
     cleanup_proc_tsd(pcurproc);
 }
 
@@ -656,7 +686,7 @@ static struct thread* create_idle_thread(struct proc *p) {
     p->idle_thread = idle;
     
     /* Make ready to run */
-    atomic_thread_state_change(idle, THREAD_STATE_READY);
+    proc_thread_state_change(idle, THREAD_STATE_READY);
     add_to_ready_queue(idle);
 
     TRACE_THREAD("IDLE: Created idle thread with tid %d", idle->tid);

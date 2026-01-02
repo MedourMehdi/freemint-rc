@@ -60,6 +60,7 @@
 #define THREAD_CTRL_GET_ERRNO_PTR      17   /* Get current thread's errno */
 #define THREAD_CTRL_SET_ERRNO_PTR      18   /* Set current thread's errno pointer */
 #define THREAD_CTRL_SIGRETURN          19   /* Signal return from signal handler */
+#define THREAD_CTRL_SETUP_THREADING    20   /* Setup threading for process */
 
 /* ============================================================================
  * P_THREAD_SYNC OPERATIONS (sys_p_thread_sync)

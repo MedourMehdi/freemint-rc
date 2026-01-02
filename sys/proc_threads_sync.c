@@ -77,6 +77,7 @@ long proc_thread_detach(long tid)
         handle_thread_joining(target, NULL);
         
         // Free resources
+        TRACE_THREAD("DETACH: Calling cleanup_thread_resources for thread %d", target->tid);
         cleanup_thread_resources(p, target, target->tid);
     }
     
@@ -185,7 +186,7 @@ long proc_thread_join(long tid, void **retval)
     TRACE_THREAD_JOIN(current, target);
     
     // Block the current thread
-    atomic_thread_state_change(current, THREAD_STATE_BLOCKED);
+    proc_thread_state_change(current, THREAD_STATE_BLOCKED);
 
     remove_from_ready_queue(current);
 
@@ -222,7 +223,7 @@ long proc_thread_join(long tid, void **retval)
     // Ensure we're in the RUNNING state
     if (current->state != THREAD_STATE_RUNNING) {
         TRACE_THREAD("JOIN: Thread %d not in RUNNING state after wake, fixing", current->tid);
-        atomic_thread_state_change(current, THREAD_STATE_RUNNING);
+        proc_thread_state_change(current, THREAD_STATE_RUNNING);
     }
 
     // Check if we're still waiting for the target thread
@@ -233,7 +234,7 @@ long proc_thread_join(long tid, void **retval)
                         current->tid, tid);
             
             // Go back to waiting
-            atomic_thread_state_change(current, THREAD_STATE_BLOCKED);
+            proc_thread_state_change(current, THREAD_STATE_BLOCKED);
             
             spl(sr);
             // Schedule another thread and continue waiting
@@ -356,6 +357,7 @@ long proc_thread_tryjoin(long tid, void **retval)
         target->joined = 1;
         
         // Free resources now
+        TRACE_THREAD("TRY_JOIN: Freeing resources for thread %ld", tid);
         cleanup_thread_resources(p, target, tid);
         
         spl(sr);
@@ -381,17 +383,23 @@ int thread_semaphore_init(struct semaphore *sem, short count) {
     return THREAD_SUCCESS;
 }
 
-// Semaphore implementation
+// Semaphore
 int thread_semaphore_down(struct semaphore *sem) {
+    /* Called as sem_wait() */
     if (!sem) {
+        TRACE_THREAD("SEMAPHORE DOWN: Invalid semaphore");
         return EINVAL;
     }
 
     struct thread *t = CURTHREAD;
     if (!t) {
+        TRACE_THREAD("SEMAPHORE DOWN: No current thread");
         return EINVAL;
     }
-
+    TRACE_THREAD("SEMAPHORE DOWN: sem=%p, &sem->wait_queue=%p, sem->count=%d", 
+                sem, &sem->wait_queue, sem->count);
+    TRACE_THREAD("SEMAPHORE DOWN: t=%p, t->tid=%d, t->magic=%lx, t->next_wait=%p", 
+                t, t->tid, t->magic, t->next_wait);
     // Prevent nested blocking
     if (t->wait_type != WAIT_NONE) {
         TRACE_THREAD("SEMAPHORE DOWN: Thread %d already blocked", t->tid);
@@ -413,21 +421,47 @@ int thread_semaphore_down(struct semaphore *sem) {
     t->wait_type |= WAIT_SEMAPHORE;
     t->sem_wait_obj = sem;
     
-    TRACE_THREAD("SEMAPHORE DOWN: Block thread %d", t->tid);
+    // TRACE_THREAD("SEMAPHORE DOWN: Block thread %d", t->tid);
     
     // Add to wait queue (FIFO for semaphores)
-    struct thread **pp = &sem->wait_queue;
-    while (*pp) pp = &(*pp)->next_wait;
-    *pp = t;
+    // TRACE_THREAD("SEMAPHORE DOWN: Adding thread %d to semaphore wait queue", t->tid);
+    // struct thread **pp = &sem->wait_queue;
+
+    // while (*pp) {
+    //     TRACE_THREAD("SEMAPHORE DOWN: Traversing wait queue, at thread %d", (*pp)->tid);
+    //     pp = &(*pp)->next_wait;
+    //     TRACE_THREAD("SEMAPHORE DOWN: Next wait queue pointer is %p", *pp);
+    // }
+    // TRACE_THREAD("SEMAPHORE DOWN: Found end of wait queue, adding thread %d", t->tid);
+    // *pp = t;
+
+    if(!sem->wait_queue) {
+        sem->wait_queue = t;
+    } else {
+        struct thread *iter = sem->wait_queue;
+        while(iter->next_wait) {
+            iter = iter->next_wait;
+        }
+        iter->next_wait = t;
+    }
+
+    // TRACE_THREAD("SEMAPHORE DOWN: Thread %d added to wait queue", t->tid);
     t->next_wait = NULL;
-    
-    atomic_thread_state_change(t, THREAD_STATE_BLOCKED);
+    // TRACE_THREAD("SEMAPHORE DOWN: Thread %d added to semaphore wait queue", t->tid);
+    proc_thread_state_change(t, THREAD_STATE_BLOCKED);
+
     spl(sr);
     
     // Schedule another thread
+    TRACE_THREAD("SEMAPHORE DOWN: Scheduling another thread");
     proc_thread_schedule();
+    TRACE_THREAD("SEMAPHORE DOWN: Woke up from semaphore wait");
     // When we resume, check if we were sleeping
     sr = splhigh();
+    TRACE_THREAD("SEMAPHORE DOWN: Woke up thread %d from semaphore wait", t->tid);
+    TRACE_THREAD("\tThread %d wait_type=%d", t->tid, t->wait_type);
+    TRACE_THREAD("\tThread %d sem_wait_obj=%p", t->tid, t->sem_wait_obj);
+    TRACE_THREAD("\tThread %d count=%d", t->tid, sem->count);
     if (t->wait_type & WAIT_SLEEP) {
         TRACE_THREAD("SEMAPHORE DOWN: Thread %d was sleeping, clearing sleep state", t->tid);
         t->wait_type &= ~WAIT_SLEEP;
@@ -440,7 +474,7 @@ int thread_semaphore_down(struct semaphore *sem) {
         t->sem_wait_obj = NULL;
     }
     spl(sr);
-
+    TRACE_THREAD("SEMAPHORE DOWN: Thread %d successfully acquired semaphore", t->tid);
     // When we resume, the semaphore has been decremented for us
     return THREAD_SUCCESS;
 }
@@ -498,7 +532,7 @@ int thread_semaphore_up(struct semaphore *sem) {
     }
     
     // Mark as ready and add to ready queue
-    atomic_thread_state_change(highest, THREAD_STATE_READY);
+    proc_thread_state_change(highest, THREAD_STATE_READY);
     add_to_ready_queue(highest);
     
     // Force immediate scheduling if higher priority

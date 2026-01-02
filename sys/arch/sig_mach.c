@@ -75,7 +75,7 @@ sendsig(ushort sig)
 
 # define newcurrent (contexts[0])
 # define oldsysctxt (contexts[1])
-
+	
 	/* NEW: Use current thread context if threading enabled */
 	if (p->p_sigacts && p->p_sigacts->thread_signals && t && t->magic == CTXT_MAGIC 
 		&& t->tid != 0

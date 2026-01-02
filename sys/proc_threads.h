@@ -142,6 +142,12 @@
 #define MAX_THREAD_PRIORITY        16   /* Internal maximum thread priority */
 #define MIN_THREAD_PRIORITY         0   /* Internal minimum thread priority */
 
+/* Aging/penalty tuning (power-of-2 for fast shifts) */
+#define AGING_SHIFT        7    /* Divide by 128 ticks (640ms) for aging bonus */
+#define CPU_PENALTY_SHIFT  8    /* Divide by 256 ticks (1280ms) for CPU penalty */
+#define MAX_AGING_BONUS    4    /* Cap aging bonus at +4 priority levels */
+#define MAX_CPU_PENALTY    3    /* Cap CPU penalty at -3 priority levels */
+
 #define THREAD_CREATION_PRIORITY_BOOST 3   /* Priority boost for new threads */
 
 // #define DEFAULT_SCHED_POLICY   SCHED_FIFO   /* Default scheduling policy */
@@ -157,5 +163,5 @@ long proc_thread_status(long tid); /* Get thread status */
 CONTEXT* get_thread_context(struct thread *t); /* Get thread context */
 struct thread* get_idle_thread(struct proc *p);	/* Get idle thread */
 struct thread* get_main_thread(struct proc *p);	/* Get main thread */
-
+struct thread *handle_thread_mode_switching(struct proc *p); /* Handle thread mode switching */
 #endif /* PROC_THREAD_H */

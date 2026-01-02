@@ -85,13 +85,17 @@ struct thread {
     
     /* Thread state and scheduling */
     short state;                    /* Thread state (RUNNING/READY/BLOCKED) */
-	unsigned char has_run;          /* Flag indicating if thread has run at least once */
-	unsigned char is_idle;          /* Flag indicating if this is an idle thread */
-	unsigned char in_ready_queue;   /* Flag indicating if thread is in ready queue */
-	unsigned char in_sleep_queue;   /* O(1) sleep queue membership flag */
-    unsigned char priority;                 /* Thread priority */
-    unsigned char original_priority;        /* Original priority (for restoration after boost) */
-    unsigned char priority_boost;           /* Flag indicating if priority is currently boosted */
+	unsigned short has_run;          /* Flag indicating if thread has run at least once */
+	unsigned short is_idle;          /* Flag indicating if this is an idle thread */
+	unsigned short in_ready_queue;   /* Flag indicating if thread is in ready queue */
+	unsigned short in_sleep_queue;   /* O(1) sleep queue membership flag */
+    short priority;                 /* Thread priority */
+    short original_priority;        /* Original priority (for restoration after boost) */
+    unsigned short priority_boost;           /* Flag indicating if priority is currently boosted */
+
+    /* CPU usage tracking for SCHED_OTHER dynamic priority */
+    unsigned long total_cpu_time;       /* Accumulated CPU time in ticks */
+
     short timeslice;                /* Timeslice for this thread */
     short remaining_timeslice;      /* Remaining timeslice */
     short total_timeslice;          /* Total timeslice allocated to this thread */
@@ -111,13 +115,13 @@ struct thread {
     void* (*func)(void*);            /* Function to execute */
     void *arg;                      /* Argument to pass to function */
 
-    unsigned char cancel_state;      // ENABLE/DISABLE
-    unsigned char cancel_type;       // DEFERRED/ASYNCHRONOUS
-    unsigned char cancel_pending;    // Flag for pending cancellation	
-    unsigned char cancel_requested;  // 1 if async cancellation should happen ASAP
+    unsigned short cancel_state;      // ENABLE/DISABLE
+    unsigned short cancel_type;       // DEFERRED/ASYNCHRONOUS
+    unsigned short cancel_pending;    // Flag for pending cancellation	
+    unsigned short cancel_requested;  // 1 if async cancellation should happen ASAP
 	
     /* Sleep and wait information */
-    unsigned char sleep_reason;             /* Reason for sleep (0 = woken by signal/other, 1 = timeout) */
+    unsigned short sleep_reason;             /* Reason for sleep (0 = woken by signal/other, 1 = timeout) */
 	TIMEOUT *sleep_timeout;  		// Timeout for sleeping
     TIMEOUT *alarm_timeout;         /* Per-thread alarm timeout */
     short wait_type;                /* Type of wait (WAIT_SIGNAL, WAIT_MUTEX, WAIT_CONDVAR, WAIT_IO, etc.) */
@@ -134,8 +138,8 @@ struct thread {
     /* Thread join fields */
     void *retval;					/* Return value from proc_thread_exit */
     struct thread *joiner;			/* Thread that is joining this thread */
-    unsigned char detached;			/* Whether thread is detached */
-    unsigned char joined;			/* Whether thread has been joined */
+    unsigned short detached;			/* Whether thread is detached */
+    unsigned short joined;			/* Whether thread has been joined */
     void **join_retval;				/* Where to store return value for joiner */
     
     /* Thread-specific data */
@@ -159,7 +163,7 @@ struct thread {
 	/* Signal queue for real-time signals (per-thread) */
 	struct sigqueue_entry *t_sigqueue_head;
 	struct sigqueue_entry *t_sigqueue_tail;
-	unsigned char t_sigqueue_count;
+	unsigned short t_sigqueue_count;
 };
 
 /**

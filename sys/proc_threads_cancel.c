@@ -72,7 +72,7 @@ void check_thread_cancellation(struct thread *t) {
                 }
                 
                 // Wake up the thread
-                atomic_thread_state_change(t, THREAD_STATE_READY);
+                proc_thread_state_change(t, THREAD_STATE_READY);
                 add_to_ready_queue(t);
                 
                 TRACE_THREAD("CANCEL: Woke up thread %d for async cancellation", t->tid);

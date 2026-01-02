@@ -58,11 +58,13 @@ static struct thread *find_first_waiting_thread(struct thread *wait_queue, struc
  * Remove thread from wait queue atomically
  */
 static void remove_thread_from_condvar_queue(struct condvar *cond, struct thread *thread_to_remove, struct thread *prev_thread) {
+    TRACE_THREAD("CONDVAR WAKE: Removing thread %d from condvar wait queue", thread_to_remove->tid);
     if (prev_thread) {
         prev_thread->next_wait = thread_to_remove->next_wait;
     } else {
         cond->wait_queue = thread_to_remove->next_wait;
     }
+    TRACE_THREAD("CONDVAR WAKE: Thread %d removed from condvar wait queue", thread_to_remove->tid);
     thread_to_remove->next_wait = NULL;
 }
 
@@ -70,6 +72,7 @@ static void remove_thread_from_condvar_queue(struct condvar *cond, struct thread
  * Wake up a thread from condition variable wait
  */
 static void wakeup_condvar_thread(struct thread *thread) {
+    TRACE_THREAD("CONDVAR WAKE: Waking up thread %d whatever it was waiting for", thread->tid);
     // Clear wait state
     thread->wait_type &= ~WAIT_CONDVAR;
     thread->cond_wait_obj = NULL;
@@ -81,7 +84,7 @@ static void wakeup_condvar_thread(struct thread *thread) {
     }
     
     // Mark as ready and add to ready queue
-    atomic_thread_state_change(thread, THREAD_STATE_READY);
+    proc_thread_state_change(thread, THREAD_STATE_READY);
     add_to_ready_queue(thread);
 }
 
@@ -157,8 +160,13 @@ int proc_thread_condvar_wait(struct condvar *cond, struct mutex *mutex) {
 
     register unsigned short sr;
     
+    TRACE_THREAD("CONDVAR WAIT: Thread %d preparing to wait on condvar=%p with mutex=%p", t->tid, cond, mutex);
+
     // Atomic mutex association
     int assoc_result = associate_mutex_atomic(cond, mutex);
+
+    TRACE_THREAD("CONDVAR WAIT: Mutex %p associated with condvar %p result=%d", mutex, cond, assoc_result);
+
     if (assoc_result != 0) {
         TRACE_THREAD("CONDVAR WAIT: Failed to associate mutex %p with condvar %p", mutex, cond);
         return EINVAL;
@@ -180,7 +188,7 @@ int proc_thread_condvar_wait(struct condvar *cond, struct mutex *mutex) {
     
     spl(sr);
 
-    atomic_thread_state_change(t, THREAD_STATE_BLOCKED);
+    proc_thread_state_change(t, THREAD_STATE_BLOCKED);
     
     // Release the mutex before blocking
     int unlock_result = thread_mutex_unlock(mutex);
@@ -199,7 +207,7 @@ int proc_thread_condvar_wait(struct condvar *cond, struct mutex *mutex) {
 
         spl(sr);
 
-        atomic_thread_state_change(t, THREAD_STATE_READY);
+        proc_thread_state_change(t, THREAD_STATE_READY);
         TRACE_THREAD("CONDVAR WAIT: Thread %d failed to unlock mutex %p, removed from condvar wait queue", t->tid, mutex);
         return unlock_result;
     }
@@ -232,6 +240,7 @@ int proc_thread_condvar_signal(struct condvar *cond) {
         return EINVAL;
     }
 
+    TRACE_THREAD("CONDVAR SIGNAL: Signaling one thread on condvar=%p", cond);
     register unsigned short sr = splhigh();
     
     // POSIX compliance: wake first waiting thread (FIFO order)
@@ -328,6 +337,9 @@ int proc_thread_condvar_timedwait(struct condvar *cond, struct mutex *mutex, lon
         return EINVAL;
     }
 
+    TRACE_THREAD("CONDVAR TIMEDWAIT: Thread %d preparing to timed wait on condvar=%p with mutex=%p for %ld ms", 
+                t->tid, cond, mutex, timeout_ms);
+                
     register unsigned short sr;
     
     // Atomic mutex association
@@ -362,7 +374,7 @@ int proc_thread_condvar_timedwait(struct condvar *cond, struct mutex *mutex, lon
     
     spl(sr);
 
-    atomic_thread_state_change(t, THREAD_STATE_BLOCKED);
+    proc_thread_state_change(t, THREAD_STATE_BLOCKED);
     
     
     
@@ -387,7 +399,7 @@ int proc_thread_condvar_timedwait(struct condvar *cond, struct mutex *mutex, lon
 
         spl(sr);
 
-        atomic_thread_state_change(t, THREAD_STATE_READY);
+        proc_thread_state_change(t, THREAD_STATE_READY);
         
         return unlock_result;
     }
@@ -466,7 +478,7 @@ static void proc_thread_condvar_timeout_handler(PROC *p, long arg) {
         t->next_wait = NULL;
         spl(sr);
         // Add to ready queue
-        atomic_thread_state_change(t, THREAD_STATE_READY);
+        proc_thread_state_change(t, THREAD_STATE_READY);
         add_to_ready_queue(t);
     }
     return;

@@ -34,43 +34,49 @@
 
 #ifdef __mcoldfire__
 /* ColdFire version - limited instruction set */
-int tas_try_lock(volatile unsigned char *lock_byte) {
+int tas_try_lock(volatile unsigned short *lock_word) {
     register unsigned char result;
+    register unsigned short sr = splhigh();
     __asm__ volatile (
-        "tas %1\n\t"        /* Test and set the lock byte; sets Z flag if it was 0 */
-        "beq 1f\n\t"        /* If Z=1 (was 0) branch to label 1 -> we acquired the lock */
-        "moveq #0,%0\n\t"   /* acquisition failed -> result = 0 */
+        "tas %1\n\t"        /* Test and set high byte of word */
+        "beq 1f\n\t"        /* If Z=1 (was 0) -> acquired lock */
+        "moveq #0,%0\n\t"   /* Failed: result = 0 */
         "bra 2f\n\t"
         "1:\n\t"
-        "moveq #1,%0\n\t"   /* acquisition succeeded -> result = 1 */
+        "moveq #1,%0\n\t"   /* Success: result = 1 */
         "2:\n\t"
-        : "=d" (result), "+m" (*lock_byte)
+        : "=d" (result), "+m" (*lock_word)
         :
         : "cc"
     );
+    spl(sr);
     return result;
 }
 #else
 /* Standard m68k version - single-cycle TAS */
-int tas_try_lock(volatile unsigned char *lock_byte) {
+int tas_try_lock(volatile unsigned short *lock_word) {
     register unsigned char result;
     __asm__ volatile (
-        "tas %1\n\t"        /* Test and set the lock byte */
-        "seq %0\n\t"        /* Set if equal (Z=1, was unlocked) */
-        "negb %0\n\t"       /* Convert to 0/1 */
-        "andb #1,%0"        /* Mask to boolean */
-        : "=d" (result), "+m" (*lock_byte)
+        "tas %1\n\t"        /* Test and set high byte of word */
+        "seq %0\n\t"        /* Set byte to $FF if Z=1 (was unlocked) */
+        "negb %0\n\t"       /* Convert $FF->1, $00->0 */
+        "andb #1,%0"        /* Ensure clean boolean 0 or 1 */
+        : "=d" (result), "+m" (*lock_word)
         :
         : "cc"
     );
+
     return result;
 }
 #endif
 
-/* Optimized unlock using CLR instruction */
-void tas_unlock(volatile unsigned char *lock_byte) {
-    /* CLR.B is 4 cycles vs 8 for MOVE.B #0 on m68k */
-    __asm__ volatile ("clr.b %0" : "=m" (*lock_byte));
+/**
+ * Unlock - Clear entire word for safety
+ * CLR.W is cleaner than CLR.B for partial word updates
+ */
+void tas_unlock(volatile unsigned short *lock_word) {
+    /* Clear entire word - 4 cycles on m68k, atomic and visible */
+    __asm__ volatile ("clr %0" : "+m" (*lock_word) :: "cc");
 }
 
 /* ============================================================================

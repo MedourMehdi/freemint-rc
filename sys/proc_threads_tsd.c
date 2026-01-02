@@ -216,20 +216,21 @@ long thread_key_create(void (*destructor)(void*)) {
     
     /* Initialize process TSD if not already done */
     if (!p->thread_keys) {
-        TRACE_THREAD("thread_key_create: initializing process TSD\n");
+        TRACE_THREAD("thread_key_create: No thread keys, initializing process TSD for process id %d", p->pid);
         if (init_proc_tsd(p) != 0) {
             spl(sr);
             return ENOMEM;
         }
     }
 
-    TRACE_THREAD("thread_key_create: destructor=%p\n", destructor);
+    TRACE_THREAD("thread_key_create: destructor=%p, process id %d", destructor, p->pid);
 
     /* Initialize TSD for current thread if needed */
     if (p->current_thread) {
         t = p->current_thread;
+        TRACE_THREAD("thread_key_create: current thread id %d", t->tid);
         if (!t->tsd_data) {
-            TRACE_THREAD("thread_key_create: initializing TSD for current thread\n");
+            TRACE_THREAD("thread_key_create: initializing TSD for current thread id %d, process id %d", t->tid, p->pid);
             init_thread_tsd(t);
         }
     }
@@ -239,7 +240,7 @@ long thread_key_create(void (*destructor)(void*)) {
         if (!p->thread_keys[i].in_use) {
             p->thread_keys[i].in_use = 1;
             p->thread_keys[i].destructor = destructor;
-            TRACE_THREAD("thread_key_create: reused key=%d\n", i);
+            TRACE_THREAD("thread_key_create: reused key=%d", i);
             spl(sr);
             return i;
         }
@@ -250,7 +251,7 @@ long thread_key_create(void (*destructor)(void*)) {
         i = p->next_key++;
         p->thread_keys[i].in_use = 1;
         p->thread_keys[i].destructor = destructor;
-        TRACE_THREAD("thread_key_create: created key=%d\n", i);
+        TRACE_THREAD("thread_key_create: created key=%d", i);
         spl(sr);
         return i;
     }
@@ -305,11 +306,18 @@ void* thread_getspecific(long key) {
     struct tsd_entry *tsd_head;
     struct tsd_entry *entry;
     
-    TRACE_THREAD("thread_getspecific: key=%ld\n", key);
-    if (!p || !p->current_thread || !p->thread_keys) {
+    TRACE_THREAD("thread_getspecific: asking for key=%ld, process id %d", key, p->pid);
+
+    // if (!p->current_thread) {
+    //     TRACE_THREAD("thread_getspecific: no current thread");
+    //     return NULL;
+    // }
+
+    if (!p->thread_keys) {
+        TRACE_THREAD("thread_getspecific: uninitialized process TSD, process id %d, thread id %d", p->pid, p->current_thread->tid);
         return NULL;
     }
-    
+
     t = p->current_thread;
     
     if (key < 0 || key >= p->next_key || !p->thread_keys[key].in_use) {
@@ -317,7 +325,7 @@ void* thread_getspecific(long key) {
         return NULL;
     }
     
-    tsd_head = (t->tid == 0) ? (struct tsd_entry*)p->proc_tsd_data : (struct tsd_entry*)t->tsd_data;
+    tsd_head = (!t || (t->tid == 0)) ? (struct tsd_entry*)p->proc_tsd_data : (struct tsd_entry*)t->tsd_data;
     entry = find_tsd_entry(tsd_head, key);
     
     TRACE_THREAD("thread_getspecific: key=%ld, value=%p\n", key, entry ? entry->value : NULL);
@@ -337,12 +345,18 @@ long thread_setspecific(long key, void *value) {
     struct tsd_entry **tsd_head_ptr;
     int result;
     
-    TRACE_THREAD("thread_setspecific: key=%ld, value=%p\n", key, value);
-    if (!p || !p->current_thread || !p->thread_keys) {
-        TRACE_THREAD("thread_setspecific: no current thread\n");
+    TRACE_THREAD("thread_setspecific: key=%ld, value=%p, process id %d", key, value, p->pid);
+
+    // if (!p->current_thread) {
+    //     TRACE_THREAD("thread_setspecific: no current thread");
+    //     return EINVAL;
+    // }
+
+    if (!p->thread_keys) {
+        TRACE_THREAD("thread_setspecific: uninitialized process TSD, process id %d, thread id %d", p->pid, p->current_thread->tid);
         return EINVAL;
-    }
-    
+    }    
+
     t = p->current_thread;
     
     if (key < 0 || key >= p->next_key || !p->thread_keys[key].in_use) {
@@ -350,14 +364,14 @@ long thread_setspecific(long key, void *value) {
         return EINVAL;
     }
     
-    tsd_head_ptr = (t->tid == 0) ? (struct tsd_entry**)&p->proc_tsd_data : (struct tsd_entry**)&t->tsd_data;
+    tsd_head_ptr = (!t || (t->tid == 0)) ? (struct tsd_entry**)&p->proc_tsd_data : (struct tsd_entry**)&t->tsd_data;
     result = set_tsd_entry(tsd_head_ptr, key, value);
     
     if (result != 0) {
         return result;
     }
     
-    TRACE_THREAD("thread_setspecific: key=%ld, value=%p\n", key, value);
+    TRACE_THREAD("thread_setspecific: key=%ld, value=%p, process id %d, thread id %d", key, value, p->pid, t->tid);
     return 0;
 }
 
