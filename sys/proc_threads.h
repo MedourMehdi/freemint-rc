@@ -164,4 +164,5 @@ CONTEXT* get_thread_context(struct thread *t); /* Get thread context */
 struct thread* get_idle_thread(struct proc *p);	/* Get idle thread */
 struct thread* get_main_thread(struct proc *p);	/* Get main thread */
 struct thread *handle_thread_mode_switching(struct proc *p); /* Handle thread mode switching */
+
 #endif /* PROC_THREAD_H */

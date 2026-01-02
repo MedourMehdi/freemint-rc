@@ -28,14 +28,19 @@
 #include "proc_threads_tsd.h"
 #include "proc_threads_cleanup.h"
 
+#define PTHREAD_INHERIT_SCHED   0
+#define PTHREAD_EXPLICIT_SCHED  1
+
+#define PTHREAD_CREATE_JOINABLE  0
 #define PTHREAD_CREATE_DETACHED  1
 
 /* Thread attribute type */
 typedef struct {
-    int detachstate;
     size_t stacksize;
+    int detachstate;
     int policy;
     int priority;
+    int inheritsched;    /* PTHREAD_INHERIT_SCHED or PTHREAD_EXPLICIT_SCHED */
 } pthread_attr_t;
 
 /* Forward declarations */
@@ -152,6 +157,7 @@ static long create_thread(struct proc *p, void *(*func)(void*), void *arg,
     short is_detached = 0;
     short sched_policy = DEFAULT_SCHED_POLICY;
     short thread_priority = -1;
+    short use_explicit_sched = 0;
     int calc_priority;
 
     /* Extract attributes if provided */
@@ -160,14 +166,22 @@ static long create_thread(struct proc *p, void *(*func)(void*), void *arg,
             stack_size = attr->stacksize;
         }
         is_detached = (attr->detachstate == PTHREAD_CREATE_DETACHED);
+        use_explicit_sched = (attr->inheritsched == PTHREAD_EXPLICIT_SCHED);
         
-        if (attr->policy > 0) {
+        if (use_explicit_sched && attr->policy > 0) {
             sched_policy = attr->policy;
         }
         
         /* Validate and clamp priority */
-        if (attr->priority >= 0) {
+        if (use_explicit_sched && attr->priority >= 0) {
             thread_priority = MIN(MAX(attr->priority, 1), MAX_THREAD_PRIORITY);
+        }
+        /* If inheriting, get from current thread */
+        if (!use_explicit_sched && p->current_thread) {
+            sched_policy = p->current_thread->policy;
+            thread_priority = p->current_thread->priority;
+            TRACE_THREAD("CREATETHREAD: Inheriting policy=%d, priority=%d from thread %d",
+                        sched_policy, thread_priority, p->current_thread->tid);
         }
     }
     
@@ -222,7 +236,8 @@ static long create_thread(struct proc *p, void *(*func)(void*), void *arg,
     if (thread_priority > 0) {
         t->priority = scale_thread_priority(thread_priority);
         t->original_priority = scale_thread_priority(thread_priority);
-        TRACE_THREAD("Using attribute priority %d for thread %d", 
+        TRACE_THREAD("Using %s priority %d for thread %d", 
+                     use_explicit_sched ? "explicit" : "inherited",
                      thread_priority, t->tid);
     } else {
         calc_priority = (p->pri < 0) ? -p->pri : p->pri;
