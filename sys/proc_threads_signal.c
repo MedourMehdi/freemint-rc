@@ -633,6 +633,7 @@ long _cdecl proc_thread_signal_mode(int enable)
 long _cdecl proc_thread_signal_sigmask(ulong mask)
 {
     struct thread *t = CURTHREAD;
+    int sig;
     
     if (!t) return EINVAL;    
 
@@ -661,7 +662,7 @@ long _cdecl proc_thread_signal_sigmask(ulong mask)
     ulong unmasked_pending = THREAD_SIGPENDING(curproc->current_thread) & ~mask;
     if (unmasked_pending) {
         TRACE_THREAD("proc_thread_signal_sigmask: unmasked_pending=0x%lx", unmasked_pending);
-        for (int sig = 1; sig < NSIG; sig++) {
+        for (sig = 1; sig < NSIG; sig++) {
             if ((unmasked_pending & (1UL << sig)) && 
                 curproc->current_thread->sig_handlers[sig].handler) {
                 TRACE_THREAD("proc_thread_signal_sigmask: dispatching signal %d / Calling handle_thread_signal()", sig);
@@ -843,7 +844,7 @@ long _cdecl proc_thread_signal_sighandler_arg(int sig, void *arg)
  */
 long _cdecl proc_thread_signal_sigwait(ulong mask, long timeout)
 {
-    int sig;
+    int sig, i;
     struct proc *p = curproc;
     struct thread *t = CURTHREAD;
 
@@ -903,7 +904,7 @@ long _cdecl proc_thread_signal_sigwait(ulong mask, long timeout)
         }
 
         /* 3) Thread pending bits */
-        for (int i = 1; i < NSIG; i++) {
+        for (i = 1; i < NSIG; i++) {
             if ((mask & (1ul << i)) && (THREAD_SIGPENDING(t) & (1ul << i))) {
                 sig = i;
                 CLEAR_THREAD_SIGPENDING(t, sig);
@@ -917,7 +918,7 @@ long _cdecl proc_thread_signal_sigwait(ulong mask, long timeout)
         }
 
         /* 4) Process pending bits */
-        for (int i = 1; i < NSIG; i++) {
+        for (i = 1; i < NSIG; i++) {
             if ((mask & (1ul << i)) && (p->sigpending & (1ul << i))) {
                 sig = i;
                 p->sigpending &= ~(1ul << i);
@@ -1017,7 +1018,7 @@ long _cdecl proc_thread_signal_sigwait(ulong mask, long timeout)
         }
 
         /* 3) Thread pending bits */
-        for (int i = 1; i < NSIG; i++) {
+        for (i = 1; i < NSIG; i++) {
             if ((mask & (1ul << i)) && (THREAD_SIGPENDING(t) & (1ul << i))) {
                 sig = i;
                 CLEAR_THREAD_SIGPENDING(t, sig);
@@ -1031,7 +1032,7 @@ long _cdecl proc_thread_signal_sigwait(ulong mask, long timeout)
         }
 
         /* 4) Process pending bits */
-        for (int i = 1; i < NSIG; i++) {
+        for (i = 1; i < NSIG; i++) {
             if ((mask & (1ul << i)) && (p->sigpending & (1ul << i))) {
                 sig = i;
                 p->sigpending &= ~(1ul << i);

@@ -676,16 +676,16 @@ sleep(int _que, long cond)
 	rm_q(READY_Q, p);
 	spl(sr);
 
-	/* Switch to main thread for multi-threaded processes */
-	if (curproc->current_thread 
-		&& curproc->current_thread->tid != 0
-	) {
-		TRACE_THREAD("SLEEPPROC: save_context THREAD ID %d, process ID %d", curproc->current_thread->tid, curproc->pid);
-		_ctx = &(curproc->current_thread->ctxt[SYSCALL]);
-	} else {
-		_ctx = &(curproc->ctxt[CURRENT]);
-	}
-
+	// /* Switch to main thread for multi-threaded processes */
+	// if (curproc->current_thread 
+	// 	&& curproc->current_thread->tid != 0
+	// ) {
+	// 	TRACE_THREAD("SLEEPPROC: save_context THREAD ID %d, process ID %d", curproc->current_thread->tid, curproc->pid);
+	// 	_ctx = &(curproc->current_thread->ctxt[SYSCALL]);
+	// } else {
+	// 	_ctx = &(curproc->ctxt[CURRENT]);
+	// }
+	_ctx = &(curproc->ctxt[CURRENT]);
 	if (save_context(_ctx))
 	{
 		/*
@@ -704,22 +704,22 @@ sleep(int _que, long cond)
 
 	curproc = p;
 
-	/* Switch to main thread for multi-threaded processes */
-	if (curproc->current_thread 
-		&& curproc->current_thread->tid != 0
-	) {
-		TRACE_THREAD("SLEEPPROC: change_context THREAD ID %d, process ID %d", curproc->current_thread->tid, curproc->pid);
-		_ctx = &(curproc->current_thread->ctxt[SYSCALL]);
-		TRACE_THREAD("SLEEPPROC: Switching to process %d, context:", curproc->pid);
-		TRACE_THREAD("  PC=%08lx, SR=%04x, USP=%08lx, SSP=%08lx",
-					_ctx->pc,
-					_ctx->sr,
-					_ctx->usp,
-					_ctx->ssp);
-	} else {
-		_ctx = &(curproc->ctxt[CURRENT]);
-	}
-
+	// /* Switch to main thread for multi-threaded processes */
+	// if (curproc->current_thread 
+	// 	&& curproc->current_thread->tid != 0
+	// ) {
+	// 	TRACE_THREAD("SLEEPPROC: change_context THREAD ID %d, process ID %d", curproc->current_thread->tid, curproc->pid);
+	// 	_ctx = &(curproc->current_thread->ctxt[SYSCALL]);
+	// 	TRACE_THREAD("SLEEPPROC: Switching to process %d, context:", curproc->pid);
+	// 	TRACE_THREAD("  PC=%08lx, SR=%04x, USP=%08lx, SSP=%08lx",
+	// 				_ctx->pc,
+	// 				_ctx->sr,
+	// 				_ctx->usp,
+	// 				_ctx->ssp);
+	// } else {
+	// 	_ctx = &(curproc->ctxt[CURRENT]);
+	// }
+	_ctx = &(curproc->ctxt[CURRENT]);
 	proc_clock = time_slice;			/* fresh time */
 
 	if ((_ctx->sr & 0x2000) == 0)	/* user mode? */

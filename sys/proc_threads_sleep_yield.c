@@ -154,6 +154,11 @@ void check_and_wake_sleeping_threads(struct proc *p) {
 void proc_thread_sleep_wakeup_handler(PROC *p, long arg) {
     struct thread *t = (struct thread *)arg;
     
+    if(curproc != p) {
+        TRACE_THREAD("SLEEP_WAKEUP: Invalid process for thread wakeup current pid %d, wanted process id %d", curproc->pid, p->pid);
+        return;
+    }
+
     /* Check for cancellation before waking up */
     if (t->cancel_pending && t->cancel_state == PTHREAD_CANCEL_ENABLE) {
         check_thread_cancellation(t);
@@ -161,7 +166,7 @@ void proc_thread_sleep_wakeup_handler(PROC *p, long arg) {
     }
     
     /* Thread is valid and sleeping, proceed with wakeup */
-    TRACE_THREAD("SLEEP_WAKEUP: Direct wakeup for thread %d", t->tid);
+    TRACE_THREAD("SLEEP_WAKEUP: Direct wakeup for thread %d, pid=%d, current pid=%d", t->tid, t->proc->pid, p->pid);
 
     /* Boost priority */
     if(!(t->t_sigpending & ~THREAD_SIGMASK(t))) {

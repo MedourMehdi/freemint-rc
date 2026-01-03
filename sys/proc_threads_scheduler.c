@@ -236,7 +236,10 @@ void thread_preempt_handler(PROC *p, long arg) {
 void proc_thread_schedule(void) {
     struct proc *p = get_curproc();
     struct scheduling_decision decision;
-
+    if (thread_switch_in_progress) {
+        TRACE_THREAD("SCHED: Nested call detected, aborting");
+        return;
+    }
     /* DEBUG: Dump queue state BEFORE scheduling */
     trace_ready_queue_dump(p, "PRE-SCHEDULE");
 
@@ -830,10 +833,8 @@ static inline short should_schedule_thread(struct thread *current,
     /* Equal priority handling */
     if (next->priority == current->priority) {
         /* SCHED_FIFO threads continue running until preempted by higher priority */
-        if (current->policy == SCHED_FIFO && next->has_run) {
-            TRACE_THREAD("THREAD_SCHED (should_schedule_thread): SCHED_FIFO thread %d continues (equal priority)",
-                        current->tid);
-            return 0;
+        if (current->policy == SCHED_FIFO && next->policy == SCHED_FIFO) {
+            return 0; /* Equal priority FIFO threads never preempt */
         }
 
         /* SCHED_RR and SCHED_OTHER use timeslice */

@@ -78,8 +78,12 @@ sendsig(ushort sig)
 	
 	/* NEW: Use current thread context if threading enabled */
 	if (p->p_sigacts && p->p_sigacts->thread_signals && t && t->magic == CTXT_MAGIC 
-		&& t->tid != 0
+		&& t->tid != 0 && t->has_run
 	) {
+		if(!(sig == SIGUSR1 || sig == SIGUSR2)) {
+			TRACE_THREAD("sendsig: Not sending signal %d to thread %d", sig, t->tid);
+			return 0;
+		}
 		TRACE_THREAD("sendsig: using thread-specific handler for sig %d, thread %d", 
 		             sig, t->tid);
 		/* Use thread stack for validation */
@@ -144,8 +148,43 @@ sendsig(ushort sig)
 	
 	++curproc->nsigs;
 
+	if (curproc->p_flag & P_FLAG_SYS)
+	{
+		/* This is a system process, e.g. a kernel thread. We can't
+		 * go into user mode for signal handling. As we know we are
+		 * already in kernel and a kernel thread must rts from the
+		 * signal handler we can simply callout the signal handler
+		 * as function.
+		 */
+		
+		DEBUG(("system process, calling signal handler 0x%lx (%d)(%s) directly", sigact->sa_handler, sig, curproc->name));
+		
+		if (is_siginfo) {
+			/* Call extended handler for system process */
+			siginfo_t info;
+			memset(&info, 0, sizeof(info));
+			info.si_signo = sig;
+			info.si_code = SI_USER;
+			TRACE_THREAD("Calling extended signal handler for system process %d", curproc->pid);
+			curproc->p_sigacts->sa_sigaction_ext[sig](sig, &info, NULL);
+		} else {
+			DEBUG(("system process, calling signal handler 0x%lx (%d)(%s) directly", sigact->sa_handler, sig, curproc->name));
+			((void (*)(short)) sigact->sa_handler)(sig);
+		}
+		
+		if (sigact->sa_flags & SA_RESETHAND)
+		{
+			TRACE(("resetting sa_handler"));
+			
+			sigact->sa_handler = SIG_DFL;
+			sigact->sa_flags &= ~SA_RESETHAND;
+		}
+		
+		return 0;
+	}
+
 	call = &(curproc->ctxt[SYSCALL]);
-	
+
 	/* what we do is build two fake stack frames; the top one is
 	 * for a call to the user function, with (long)parameter being the
 	 * signal number; the bottom one is for sig_return.
@@ -189,15 +228,14 @@ sendsig(ushort sig)
 	 */
 	ut = curproc->p_mem->tp_ptr;
 
-	// TRACE_THREAD("sendsig: old stack=%lx, new stack=%lx, usp=%lx, ssp=%lx, sr=%x", 
-	//              oldstack, newstack, call->usp, call->ssp, call->sr);
 
+	// if (p->current_thread) TRACE_THREAD("sendsig: old stack=%lx, new stack=%lx, usp=%lx, ssp=%lx, sr=%x", oldstack, newstack, call->usp, call->ssp, call->sr);
 	/* For SA_SIGINFO handlers, we need to pass siginfo_t */
 	if (is_siginfo) {
 		unsigned short sr;
 		siginfo_t temp_info;
 		
-		// TRACE_THREAD("sendsig: SA_SIGINFO handler for sig %d", sig);
+		TRACE_THREAD("sendsig: SA_SIGINFO handler for sig %d", sig);
 		
 		/* Check if this signal is queued with siginfo data */
 		sr = splhigh();
@@ -238,6 +276,7 @@ sendsig(ushort sig)
 		// TRACE_THREAD("sendsig: siginfo copied to user space, si_signo=%d, si_value=%d", 
 		// 			temp_info.si_signo, temp_info.si_value.sival_int);
 	}
+	
 	TRACE_THREAD("sendsig: building sigcontext at stack=%p", stack);
 
 	/* Push sigcontext */

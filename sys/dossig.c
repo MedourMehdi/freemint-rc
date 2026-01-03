@@ -384,6 +384,7 @@ sys_p_sigsetmask (ulong mask)
 	PROC *p = get_curproc();
 	struct thread *t = CURTHREAD;
 	ulong oldmask;
+	int sig;
 
 	TRACE (("Psigsetmask(%lx)",mask));
 
@@ -395,7 +396,7 @@ sys_p_sigsetmask (ulong mask)
 		/* CRITICAL: Dispatch any signals that are now unmasked AND have handlers */
 		ulong unmasked_pending = THREAD_SIGPENDING(t) & ~THREAD_SIGMASK(t);
 		if (unmasked_pending) {
-			for (int sig = 1; sig < NSIG; sig++) {
+			for (sig = 1; sig < NSIG; sig++) {
 				if ((unmasked_pending & (1UL << sig)) && t->sig_handlers[sig].handler) {
 					TRACE_THREAD("Psigsetmask: dispatching unmasked signal %d / Calling handle_thread_signal()", sig);
 					handle_thread_signal(t, sig);

@@ -52,8 +52,8 @@ void add_to_ready_queue(struct thread *t) {
     /* Mark as in ready queue before adding */
     t->in_ready_queue = 1;
     
-    TRACE_THREAD("READY_Q: Adding Thread %d (pri %d, policy %d, boost=%d)",
-                t->tid, t->priority, t->policy, t->priority_boost);
+    TRACE_THREAD("READY_Q: Adding Thread %d (pri %d, policy %d, boost=%d), Proc PID %d",
+                t->tid, t->priority, t->policy, t->priority_boost, p->pid);
     
     /* If ready queue is empty, just add the thread */
     if (!p->ready_queue) {
