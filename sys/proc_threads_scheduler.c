@@ -234,12 +234,15 @@ void thread_preempt_handler(PROC *p, long arg) {
 /* section, then execute in minimal critical section.                        */
 /******************************************************************************/
 void proc_thread_schedule(void) {
+    
     struct proc *p = get_curproc();
     struct scheduling_decision decision;
+
     if (thread_switch_in_progress) {
         TRACE_THREAD("SCHED: Nested call detected, aborting");
         return;
     }
+
     /* DEBUG: Dump queue state BEFORE scheduling */
     trace_ready_queue_dump(p, "PRE-SCHEDULE");
 
@@ -783,12 +786,12 @@ static inline short should_schedule_thread(struct thread *current,
         return 1;
     }
     
-    /* Special case: thread0 preemptible by other non-idle threads */
-    if (current->tid == 0 && next->tid > 0) {
-        TRACE_THREAD("THREAD_SCHED (should_schedule_thread): thread0 is "
-                    "current, allowing switch to thread %d", next->tid);
-        return 1;
-    }
+    // /* Special case: thread0 preemptible by other non-idle threads */
+    // if (current->tid == 0 && next->tid > 0) {
+    //     TRACE_THREAD("THREAD_SCHED (should_schedule_thread): thread0 is "
+    //                 "current, allowing switch to thread %d", next->tid);
+    //     return 1;
+    // }
 
     /* If current thread not running, always schedule next */
     if ((current->state != THREAD_STATE_RUNNING) || 

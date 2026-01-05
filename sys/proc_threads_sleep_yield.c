@@ -114,6 +114,7 @@ int wake_threads_by_time(struct proc *p, unsigned long current_time) {
         /* Boost priority */
         if(!(t->t_sigpending & ~THREAD_SIGMASK(t))) {
             boost_thread_priority(t, 5);
+            TRACE_THREAD("SLEEP: Boosted thread %d priority to %d", t->tid, t->priority);
         }
         
         /* Update state */
@@ -153,11 +154,6 @@ void check_and_wake_sleeping_threads(struct proc *p) {
  */
 void proc_thread_sleep_wakeup_handler(PROC *p, long arg) {
     struct thread *t = (struct thread *)arg;
-    
-    if(curproc != p) {
-        TRACE_THREAD("SLEEP_WAKEUP: Invalid process for thread wakeup current pid %d, wanted process id %d", curproc->pid, p->pid);
-        return;
-    }
 
     /* Check for cancellation before waking up */
     if (t->cancel_pending && t->cancel_state == PTHREAD_CANCEL_ENABLE) {
@@ -171,6 +167,7 @@ void proc_thread_sleep_wakeup_handler(PROC *p, long arg) {
     /* Boost priority */
     if(!(t->t_sigpending & ~THREAD_SIGMASK(t))) {
         boost_thread_priority(t, 5);
+        TRACE_THREAD("SLEEP_WAKEUP: Boosted thread %d priority to %d", t->tid, t->priority);
     }
     
     /* Wake up thread - optimized path */
@@ -180,7 +177,10 @@ void proc_thread_sleep_wakeup_handler(PROC *p, long arg) {
     remove_from_sleep_queue(p, t);
     proc_thread_state_change(t, THREAD_STATE_READY);
     add_to_ready_queue(t);
-    
+    if(curproc != p) {
+        TRACE_THREAD("SLEEP_WAKEUP: Invalid process for thread wakeup current pid %d, wanted process id %d", curproc->pid, p->pid);
+        return;
+    }
     proc_thread_schedule();
 }
 
