@@ -85,7 +85,7 @@ inline int spinlock_trylock(spinlock_t *lock);
 
 /* Atomic counter for generating unique IDs */
 typedef struct {
-    volatile int counter;
+    volatile long counter;
 } atomic_counter_t;
 
 
@@ -107,15 +107,15 @@ inline int atomic_counter_inc(atomic_counter_t *counter);
 inline int atomic_counter_dec(atomic_counter_t *counter);
 inline int atomic_counter_get(atomic_counter_t *counter);
 /* Atomic operations */
-inline int atomic_xor(volatile int *ptr, int value);
-inline int atomic_and(volatile int *ptr, int value);
-inline int atomic_or(volatile int *ptr, int value);
-inline int atomic_sub(volatile int *ptr, int value);
-inline int atomic_add(volatile int *ptr, int value);
-inline int atomic_exchange(volatile int *ptr, int newval);
-inline int atomic_cas(volatile int *ptr, int oldval, int newval);
-inline int atomic_decrement(volatile int *value);
-inline int atomic_increment(volatile int *value);
+inline int atomic_xor(volatile long *ptr, long value);
+inline int atomic_and(volatile long *ptr, long value);
+inline int atomic_or(volatile long *ptr, long value);
+inline int atomic_sub(volatile long *ptr, long value);
+inline int atomic_add(volatile long *ptr, long value);
+inline int atomic_exchange(volatile long *ptr, long newval);
+inline int atomic_cas(volatile long *ptr, long oldval, long newval);
+inline int atomic_decrement(volatile long *value);
+inline int atomic_increment(volatile long *value);
 
 /* ============================================================================
  * CONVENIENCE MACROS AND WRAPPERS

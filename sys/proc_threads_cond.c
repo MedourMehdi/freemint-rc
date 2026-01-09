@@ -92,6 +92,10 @@ static void wakeup_condvar_thread(struct thread *thread) {
  * Initialize a condition variable
  */
 int proc_thread_condvar_init(struct condvar *cond) {
+    if (!CURTHREAD) {
+        TRACE_THREAD("THREAD_MUTEX_LOCK: No current thread");
+        if(!handle_thread_mode_switching(curproc)) return EINVAL;
+    }
     if (!cond) {
         return EINVAL;
     }

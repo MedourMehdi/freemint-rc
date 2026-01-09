@@ -57,7 +57,7 @@ struct sigqueue_params {
 };
 
 long _cdecl sys_p_thread_ctrl(long func, long arg1, long arg2) {
-    // TRACE_THREAD("CTRL: sys_p_thread_ctrl called with func=%ld arg1=%ld arg2=%ld", func, arg1, arg2);
+    TRACE_THREAD("CTRL: sys_p_thread_ctrl called with func=%ld arg1=%ld arg2=%ld", func, arg1, arg2);
     switch (func) {
         case THREAD_CTRL_EXIT: // Exit thread
             TRACE_THREAD("EXIT: sys_p_thread_ctrl called with exit func");
@@ -564,6 +564,10 @@ long _cdecl sys_p_thread_sync(long operator, long arg1, long arg2) {
             
         case THREAD_SYNC_MUTEXATTR_SETTYPE:
             {
+                if (!CURTHREAD) {
+                    TRACE_THREAD("THREAD_MUTEX_LOCK: No current thread");
+                    if(!handle_thread_mode_switching(curproc)) return EINVAL;
+                }                
                 struct mutex_attr *attr = (struct mutex_attr *)arg1;
                 int type = (int)arg2;
 
@@ -618,6 +622,10 @@ long _cdecl sys_p_thread_sync(long operator, long arg1, long arg2) {
 
         case THREAD_SYNC_MUTEXATTR_GETTYPE:
             {
+                if (!CURTHREAD) {
+                    TRACE_THREAD("THREAD_MUTEX_LOCK: No current thread");
+                    if(!handle_thread_mode_switching(curproc)) return EINVAL;
+                }                
                 struct mutex_attr *user_attr = (struct mutex_attr *)arg1;
                 long *type = (long *)arg2;
 
@@ -779,31 +787,31 @@ long _cdecl sys_p_pthread(long syscall_func, long arg1, long arg2, long arg3) {
             return proc_thread_get_timeslice(arg1, (long*)arg2, (long*)arg3);
 
         case THREAD_ATOMIC_INCREMENT:
-            return !((volatile int *)arg1) ? EINVAL : atomic_increment((volatile int *)arg1);
+            return !((volatile long *)arg1) ? EINVAL : atomic_increment((volatile long *)arg1);
             
         case THREAD_ATOMIC_DECREMENT:
-            return !((volatile int *)arg1) ? EINVAL : atomic_decrement((volatile int *)arg1);
+            return !((volatile long *)arg1) ? EINVAL : atomic_decrement((volatile long *)arg1);
             
         case THREAD_ATOMIC_CAS:
-            return !((volatile int *)arg1) ? EINVAL : atomic_cas((volatile int *)arg1, (int)arg2, (int)arg3);
+            return !((volatile long *)arg1) ? EINVAL : atomic_cas((volatile long *)arg1, arg2, arg3);
             
         case THREAD_ATOMIC_EXCHANGE:
-            return !((volatile int *)arg1) ? EINVAL : atomic_exchange((volatile int *)arg1, (int)arg2);
+            return !((volatile long *)arg1) ? EINVAL : atomic_exchange((volatile long *)arg1, (long)arg2);
             
         case THREAD_ATOMIC_ADD:
-            return !((volatile int *)arg1) ? EINVAL : atomic_add((volatile int *)arg1, (int)arg2);
+            return !((volatile long *)arg1) ? EINVAL : atomic_add((volatile long *)arg1, (long)arg2);
             
         case THREAD_ATOMIC_SUB:
-            return !((volatile int *)arg1) ? EINVAL : atomic_sub((volatile int *)arg1, (int)arg2);
+            return !((volatile long *)arg1) ? EINVAL : atomic_sub((volatile long *)arg1, (long)arg2);
             
         case THREAD_ATOMIC_OR:
-            return !((volatile int *)arg1) ? EINVAL : atomic_or((volatile int *)arg1, (int)arg2);
+            return !((volatile long *)arg1) ? EINVAL : atomic_or((volatile long *)arg1, (long)arg2);
             
         case THREAD_ATOMIC_AND:
-            return !((volatile int *)arg1) ? EINVAL : atomic_and((volatile int *)arg1, (int)arg2);
+            return !((volatile long *)arg1) ? EINVAL : atomic_and((volatile long *)arg1, (long)arg2);
             
         case THREAD_ATOMIC_XOR:
-            return !((volatile int *)arg1) ? EINVAL : atomic_xor((volatile int *)arg1, (int)arg2);
+            return !((volatile long *)arg1) ? EINVAL : atomic_xor((volatile long *)arg1, (long)arg2);
 
         case THREAD_ATOMIC_TAS:
             // TRACE_THREAD("THREAD_ATOMIC_TAS: arg1=%p", (void *)arg1);

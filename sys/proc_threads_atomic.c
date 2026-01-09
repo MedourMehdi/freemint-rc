@@ -82,7 +82,7 @@ void tas_unlock(volatile unsigned short *lock_word) {
 /* ============================================================================
  * ATOMIC OPERATIONS USING INTERRUPT DISABLE
  * ============================================================================ */
-inline int atomic_increment(volatile int *value) {
+inline int atomic_increment(volatile long *value) {
     int result;
     register unsigned short sr = splhigh();
     result = ++(*value);
@@ -90,7 +90,7 @@ inline int atomic_increment(volatile int *value) {
     return result;
 }
 
-inline int atomic_decrement(volatile int *value) {
+inline int atomic_decrement(volatile long *value) {
     int result;
     register unsigned short sr = splhigh();
     result = --(*value);
@@ -98,20 +98,22 @@ inline int atomic_decrement(volatile int *value) {
     return result;
 }
 
-inline int atomic_cas(volatile int *ptr, int oldval, int newval) {
+inline int atomic_cas(volatile long *ptr, long oldval, long newval) {
     int result;
     register unsigned short sr = splhigh();
     if (*ptr == oldval) {
+        TRACE_THREAD("atomic_cas: Success, oldval=%ld, newval=%ld\n", oldval, newval);
         *ptr = newval;
         result = 1;  /* Success - old value matched */
     } else {
+        TRACE_THREAD("atomic_cas: Failure, oldval=%ld, newval=%ld\n", oldval, newval);
         result = 0;  /* Failure - old value didn't match */
     }
     spl(sr);
     return result;
 }
 
-inline int atomic_exchange(volatile int *ptr, int newval) {
+inline int atomic_exchange(volatile long *ptr, long newval) {
     int oldval;
     register unsigned short sr = splhigh();
     oldval = *ptr;
@@ -120,7 +122,7 @@ inline int atomic_exchange(volatile int *ptr, int newval) {
     return oldval;
 }
 
-inline int atomic_add(volatile int *ptr, int value) {
+inline int atomic_add(volatile long *ptr, long value) {
     int result;
     register unsigned short sr = splhigh();
     result = (*ptr) + value;
@@ -129,7 +131,7 @@ inline int atomic_add(volatile int *ptr, int value) {
     return result;
 }
 
-inline int atomic_sub(volatile int *ptr, int value) {
+inline int atomic_sub(volatile long *ptr, long value) {
     int result;
     register unsigned short sr = splhigh();
     result = (*ptr) - value;
@@ -138,7 +140,7 @@ inline int atomic_sub(volatile int *ptr, int value) {
     return result;
 }
 
-inline int atomic_or(volatile int *ptr, int value) {
+inline int atomic_or(volatile long *ptr, long value) {
     int result;
     register unsigned short sr = splhigh();
     result = (*ptr) | value;
@@ -147,7 +149,7 @@ inline int atomic_or(volatile int *ptr, int value) {
     return result;
 }
 
-inline int atomic_and(volatile int *ptr, int value) {
+inline int atomic_and(volatile long *ptr, long value) {
     int result;
     register unsigned short sr = splhigh();
     result = (*ptr) & value;
@@ -156,7 +158,7 @@ inline int atomic_and(volatile int *ptr, int value) {
     return result;
 }
 
-inline int atomic_xor(volatile int *ptr, int value) {
+inline int atomic_xor(volatile long *ptr, long value) {
     int result;
     register unsigned short sr = splhigh();
     result = (*ptr) ^ value;

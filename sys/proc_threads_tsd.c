@@ -208,10 +208,10 @@ long thread_key_create(void (*destructor)(void*)) {
     unsigned short sr = splhigh();
     struct proc *p = curproc;
     struct thread *t;
-
-    if (!p) {
-        spl(sr);
-        return EINVAL;
+    
+    if (!CURTHREAD) {
+        TRACE_THREAD("THREAD_MUTEX_LOCK: No current thread");
+        if(!handle_thread_mode_switching(p)) return EINVAL;
     }
     
     /* Initialize process TSD if not already done */
