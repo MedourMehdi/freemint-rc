@@ -553,6 +553,12 @@ XA_evnt_multi(int lock, struct xa_client *client, AESPB *pb)
 		DIAG((D_multi, client, "evnt_multi: %s flagged as lagging! - cleared", client->name));
 	}
 
+	/* Register this thread as AES event handler */
+	if (client->p->current_thread)
+		client->aes_thread_tid = client->p->current_thread->tid;
+	else
+		client->aes_thread_tid = -1;
+
 	/* here we prepare structures necessary to wait for events
 	*/
 	client->em.flags = 0;

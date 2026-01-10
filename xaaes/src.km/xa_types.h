@@ -2130,6 +2130,7 @@ struct xa_client
 #endif
 	short  rppid;			/* Pid of our 'real' parent, the client that called shel_write() to give birth*/
 
+	short aes_thread_tid;		/* TID of thread handling AES event loop */
 	struct proc *p;			/* context back ptr */
 	struct xa_user_things *ut;	/* trampoline code for user callbacks */
 	struct proc *tp;		/* Thread */
