@@ -172,8 +172,7 @@ init_client(int lock, bool sysclient)
 
 	init_client_mdbuff(client);
 	client->block = cBlock;
-	/* Initialize AES thread tracking */
-	client->aes_thread_tid = -1;
+
 	/*
 	 * Stuff the new client inherits from AESSYS
 	 */

@@ -716,11 +716,7 @@ send_a_message(int lock, struct xa_client *dest_client, short amq, short qmf, un
 		}
 	}
 	queue_message(lock, dest_client, amq, qmf, msg);
-	/* Wake the correct thread if multi-threaded */
-	/* Only unblock if message goes to AES event-handling thread */
-	if (dest_client->aes_thread_tid == -1 || 
-	    (dest_client->p->current_thread && dest_client->p->current_thread->tid == dest_client->aes_thread_tid))
-		Unblock(dest_client, 1);
+	Unblock(dest_client, 1);
 }
 
 /*
