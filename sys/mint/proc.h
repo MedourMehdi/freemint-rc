@@ -447,10 +447,8 @@ struct proc
 
 /* Threads stuff */
 	struct {
-		short thread_id;		// Thread actuellement préempté
-		short enabled;			// Timer actif ?
 		TIMEOUT *timeout;		// Handle du timeout
-		unsigned short sr;		// Etat d'interruption sauvegardé
+		short enabled;			// Timer actif ?
 		short in_handler;		// Handler en cours ?
 	} p_thread_timer;
 

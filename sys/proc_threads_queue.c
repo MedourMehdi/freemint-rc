@@ -22,6 +22,7 @@
 #include "proc_threads_queue.h"
 #include "proc_threads_helper.h"
 #include "proc_threads_sync.h"
+#include "proc_threads_sem.h"
 
 void add_to_ready_queue(struct thread *t) {
     struct proc *p;
@@ -159,7 +160,7 @@ void remove_from_sleep_queue(struct proc *p, struct thread *t) {
         }
         pp = &(*pp)->next_sleeping;
     }
-    
+    // if(curproc != p) make_process_eligible(p);
     spl(sr);
 }
 
@@ -347,36 +348,44 @@ int is_in_sleep_queue(struct proc *p, struct thread *t) {
 struct thread *find_highest_priority_thread_in_queue(struct thread *queue, 
                                                      struct thread **prev_highest) {
     if (!queue) {
+        TRACE_THREAD("FIND_HIGHEST_PRIORITY_THREAD: Invalid queue");
         return NULL;
     }
     
+    TRACE_THREAD("FIND_HIGHEST_PRIORITY_THREAD: Finding highest priority thread in queue");
     /* Track highest priority thread found */
     struct thread *best_thread = NULL;
     struct thread *best_prev = NULL;
     int best_priority = -1;
     
+    TRACE_THREAD("FIND_HIGHEST_PRIORITY_THREAD: Checking first thread");
     struct thread *t = queue;
     struct thread *prev = NULL;
     
     /* Single pass: find highest priority thread directly */
     while (t) {
+        TRACE_THREAD("FIND_HIGHEST_PRIORITY_THREAD: Checking thread %d", t->tid);
         /* Validate thread */
         if (t->magic == CTXT_MAGIC && 
             !(t->state & THREAD_STATE_EXITED) && 
             t->priority < 17) {
-            
+            TRACE_THREAD("FIND_HIGHEST_PRIORITY_THREAD: Found thread %d with priority %d", t->tid, t->priority);
             /* Track thread with highest priority (first wins ties) */
             if (t->priority > best_priority) {
                 best_priority = t->priority;
                 best_thread = t;
                 best_prev = prev;
+                TRACE_THREAD("FIND_HIGHEST_PRIORITY_THREAD: Found thread %d with priority %d", t->tid, t->priority);
             }
         }
         prev = t;
-        t = t->next_wait;        
+        t = t->next_wait;
+        TRACE_THREAD("FIND_HIGHEST_PRIORITY_THREAD: Checking next thread");    
     }
     
+    TRACE_THREAD("FIND_HIGHEST_PRIORITY_THREAD: Found highest priority thread %d", best_thread ? best_thread->tid : -1);
     /* Return results */
     *prev_highest = best_prev;
+    TRACE_THREAD("FIND_HIGHEST_PRIORITY_THREAD: Returning highest priority thread %d", best_thread ? best_thread->tid : -1);
     return best_thread;
 }

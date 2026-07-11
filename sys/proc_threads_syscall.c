@@ -16,6 +16,7 @@
 #include "proc_threads_policy.h"
 #include "proc_threads_signal.h"
 #include "proc_threads_sync.h"
+#include "proc_threads_sem.h"
 #include "proc_threads_scheduler.h"
 #include "proc_threads_signal.h"
 #include "proc_threads_sleep_yield.h"
@@ -57,18 +58,23 @@ struct sigqueue_params {
 };
 
 long _cdecl sys_p_thread_ctrl(long func, long arg1, long arg2) {
-    TRACE_THREAD("CTRL: sys_p_thread_ctrl called with func=%ld arg1=%ld arg2=%ld", func, arg1, arg2);
+
+    TRACE_THREAD_VERBOSE("CTRL: sys_p_thread_ctrl called with func=%ld arg1=%ld arg2=%ld", func, arg1, arg2);
+
     switch (func) {
-        case THREAD_CTRL_EXIT: // Exit thread
-            TRACE_THREAD("EXIT: sys_p_thread_ctrl called with exit func");
-            proc_thread_exit((void*)arg1, NULL);  // Use arg1 as the return value
-            return 0;  // Should never reach here
+
+        case THREAD_CTRL_EXIT:
+            TRACE_THREAD("SYSCALL THREAD_CTRL_EXIT");
+            proc_thread_exit((void*)arg1, NULL);  /* Use arg1 as the return value */
+            return 0;
 
         case THREAD_CTRL_SETCANCELSTATE: {
+
             struct thread *t = CURTHREAD;
+            int new_state = (int)arg1;
+
             if (!t) return EINVAL;
             
-            int new_state = (int)arg1;
             if (new_state != PTHREAD_CANCEL_ENABLE && 
                 new_state != PTHREAD_CANCEL_DISABLE) {
                 return EINVAL;
@@ -316,7 +322,9 @@ long _cdecl sys_p_thread_ctrl(long func, long arg1, long arg2) {
 }
 
 long _cdecl sys_p_thread_signal(long func, long arg1, long arg2) {
-    TRACE_THREAD("sys_p_thread_signal: func=%ld, arg1=%ld, arg2=%ld", func, arg1, arg2);
+
+    TRACE_THREAD_VERBOSE("SYSCALL sys_p_thread_signal: func=%ld, arg1=%ld, arg2=%ld", func, arg1, arg2);
+
     switch (func) {
         case PTSIG_MODE:
             TRACE_THREAD("proc_thread_signal_mode: %s thread signals",  arg1 ? "enabling" : "disabling");
@@ -521,117 +529,105 @@ long _cdecl sys_p_thread_signal(long func, long arg1, long arg2) {
 }
 
 long _cdecl sys_p_thread_sync(long operator, long arg1, long arg2) {
-    // TRACE_THREAD("sys_p_thread_sync: operator=%d arg1=%d arg2=%d", operator, arg1, arg2);
-    // TRACE_THREAD("sys_p_thread_sync: PROC ID %d, THREAD ID %d", curproc ? curproc->pid : -1, CURTHREAD ? CURTHREAD->tid : -1);
-    // TRACE_THREAD("sys_p_thread_sync: PROC SYSCALL SR %x, PC %lx, SSP %lx, USP %lx", curproc->ctxt[SYSCALL].sr, curproc->ctxt[SYSCALL].pc, curproc->ctxt[SYSCALL].ssp, curproc->ctxt[SYSCALL].usp);
+
     switch (operator) {
+
+        case THREAD_SYNC_SEM_TRYWAIT:
+            TRACE_THREAD("SYSCALL THREAD_SYNC_SEM_TRYWAIT");
+            return thread_semaphore_trydown((struct semaphore *)arg1);
+
+        case THREAD_SYNC_SEM_TIMEDWAIT:
+            TRACE_THREAD("SYSCALL THREAD_SYNC_SEM_TIMEDWAIT");
+            return thread_semaphore_timeddown((struct semaphore *)arg1, arg2); 
+
         case THREAD_SYNC_SEM_WAIT:
-            TRACE_THREAD("THREAD_SYNC_SEM_WAIT");
+            TRACE_THREAD("SYSCALL THREAD_SYNC_SEM_WAIT");
             return thread_semaphore_down((struct semaphore *)arg1);
-            
+
         case THREAD_SYNC_SEM_POST:
-            TRACE_THREAD("THREAD_SYNC_SEM_POST");
+            TRACE_THREAD("SYSCALL THREAD_SYNC_SEM_POST");
             return thread_semaphore_up((struct semaphore *)arg1);
-            
+
         case THREAD_SYNC_MUTEX_LOCK:
-            // TRACE_THREAD("THREAD_SYNC_MUTEX_LOCK");
+            TRACE_THREAD("SYSCALL THREAD_SYNC_MUTEX_LOCK");
             return thread_mutex_lock((struct mutex *)arg1);
 
         case THREAD_SYNC_MUTEX_TRYLOCK:
-            TRACE_THREAD("THREAD_SYNC_MUTEX_TRYLOCK");
+            TRACE_THREAD("SYSCALL THREAD_SYNC_MUTEX_TRYLOCK");
             return thread_mutex_trylock((struct mutex *)arg1);
 
         case THREAD_SYNC_MUTEX_UNLOCK:
-            // TRACE_THREAD("THREAD_SYNC_MUTEX_UNLOCK");
+            TRACE_THREAD("SYSCALL THREAD_SYNC_MUTEX_UNLOCK");
             return thread_mutex_unlock((struct mutex *)arg1);
             
         case THREAD_SYNC_MUTEX_INIT:
-            TRACE_THREAD("THREAD_SYNC_MUTEX_INIT");
+            TRACE_THREAD("SYSCALL THREAD_SYNC_MUTEX_INIT");
             return thread_mutex_init((struct mutex *)arg1, (const struct mutex_attr *)arg2);
 
-            // Mutex attribute functions
         case THREAD_SYNC_MUTEX_DESTROY:
-            TRACE_THREAD("THREAD_SYNC_MUTEX_DESTROY");
+            TRACE_THREAD("SYSCALL THREAD_SYNC_MUTEX_DESTROY");
             return thread_mutex_destroy((struct mutex *)arg1);
 
         case THREAD_SYNC_MUTEX_ATTR_INIT:
-            TRACE_THREAD("THREAD_SYNC_MUTEXATTR_INIT");
+            TRACE_THREAD("SYSCALL THREAD_SYNC_MUTEXATTR_INIT");
             return thread_mutexattr_init((struct mutex_attr *)arg1);
 
         case THREAD_SYNC_MUTEX_ATTR_DESTROY:
-            TRACE_THREAD("THREAD_SYNC_MUTEXATTR_DESTROY");
+            TRACE_THREAD("SYSCALL THREAD_SYNC_MUTEXATTR_DESTROY");
             return thread_mutexattr_destroy((struct mutex_attr *)arg1);
             
         case THREAD_SYNC_MUTEXATTR_SETTYPE:
             {
-                if (!CURTHREAD) {
-                    TRACE_THREAD("THREAD_MUTEX_LOCK: No current thread");
-                    if(!handle_thread_mode_switching(curproc)) return EINVAL;
-                }                
+                if (!CURTHREAD) handle_thread_mode_switching(curproc);
+
                 struct mutex_attr *attr = (struct mutex_attr *)arg1;
                 int type = (int)arg2;
 
-                if (!attr) {
-                    TRACE_THREAD("SETTYPE: attr is NULL");
-                    return EINVAL;
-                }
-                
-                if (type < PTHREAD_MUTEX_NORMAL || type > PTHREAD_MUTEX_ERRORCHECK) {
-                    TRACE_THREAD("SETTYPE: invalid type %d", type);
-                    return EINVAL;
-                }
-                
-                // TRACE_THREAD("SETTYPE: attr=%p, setting type to %d", attr, type);
-                
+                TRACE_THREAD("SYSCALL THREAD_SYNC_MUTEXATTR_SETTYPE");
+                if (!attr) return EINVAL;
+                if (type < PTHREAD_MUTEX_NORMAL || type > PTHREAD_MUTEX_ERRORCHECK) return EINVAL;
                 attr->type = type;
-                
-                // TRACE_THREAD("SETTYPE: attr->type is now %d", attr->type);
-                
                 return THREAD_SUCCESS;
             }
 
         case THREAD_SYNC_MUTEXATTR_SETPROTOCOL:
             {
+                if (!CURTHREAD) handle_thread_mode_switching(curproc);
+
                 struct mutex_attr *attr = (struct mutex_attr *)arg1;
                 int protocol = (int)arg2;
 
-                if (!attr) 
-                    return EINVAL;
-
-                if (protocol < PTHREAD_PRIO_NONE || protocol > PTHREAD_PRIO_PROTECT)
-                    return EINVAL;
-                TRACE_THREAD("THREAD_SYNC_MUTEXATTR_SETPROTOCOL: attr=%p, protocol=%d", attr, protocol);
+                TRACE_THREAD("SYSCALL THREAD_SYNC_MUTEXATTR_SETPROTOCOL");
+                if (!attr) return EINVAL;
+                if (protocol < PTHREAD_PRIO_NONE || protocol > PTHREAD_PRIO_PROTECT) return EINVAL;
                 attr->protocol = protocol;
-                TRACE_THREAD("THREAD_SYNC_MUTEXATTR_SETPROTOCOL: attr->protocol is now %d", attr->protocol);
                 return THREAD_SUCCESS;
             }
             
         case THREAD_SYNC_MUTEXATTR_SETPRIOCEILING:
             {
+                if (!CURTHREAD) handle_thread_mode_switching(curproc);
+
                 struct mutex_attr *attr = (struct mutex_attr *)arg1;
                 int prioceiling = (int)arg2;
-                if (!attr) 
-                    return EINVAL;
-                
-                if (prioceiling < 0 || prioceiling > MAX_POSIX_THREAD_PRIORITY)
-                    return EINVAL;
-                
+
+                TRACE_THREAD("SYSCALL THREAD_SYNC_MUTEXATTR_SETPRIOCEILING");
+                if (!attr) return EINVAL;
+                if (prioceiling < 0 || prioceiling > MAX_POSIX_THREAD_PRIORITY) return EINVAL;
                 attr->prioceiling = prioceiling;
                 return THREAD_SUCCESS;
             }
 
         case THREAD_SYNC_MUTEXATTR_GETTYPE:
             {
-                if (!CURTHREAD) {
-                    TRACE_THREAD("THREAD_MUTEX_LOCK: No current thread");
-                    if(!handle_thread_mode_switching(curproc)) return EINVAL;
-                }                
+                if (!CURTHREAD) handle_thread_mode_switching(curproc);
+
                 struct mutex_attr *user_attr = (struct mutex_attr *)arg1;
                 long *type = (long *)arg2;
 
+                TRACE_THREAD("SYSCALL THREAD_SYNC_MUTEXATTR_GETTYPE");
                 if (!user_attr || !type) return EINVAL;
                 *type = user_attr->type;
-                TRACE_THREAD("THREAD_SYNC_MUTEXATTR_GETTYPE: type=%d, type addr is %p", *type, type);
                 return THREAD_SUCCESS;
             }
 
@@ -640,9 +636,9 @@ long _cdecl sys_p_thread_sync(long operator, long arg1, long arg2) {
                 struct mutex_attr *user_attr = (struct mutex_attr *)arg1;
                 long *prioceiling = (long *)arg2;
 
+                TRACE_THREAD("SYSCALL THREAD_SYNC_MUTEXATTR_GETPRIOCEILING");
                 if (!user_attr || !prioceiling) return EINVAL;
                 *prioceiling = user_attr->prioceiling;
-                TRACE_THREAD("THREAD_SYNC_MUTEXATTR_GETPRIOCEILING: prioceiling=%d, prioceiling addr is %p", *prioceiling, prioceiling);
                 return THREAD_SUCCESS;
             }
 
@@ -651,181 +647,205 @@ long _cdecl sys_p_thread_sync(long operator, long arg1, long arg2) {
                 struct mutex_attr *user_attr = (struct mutex_attr *)arg1;
                 long *protocol = (long *)arg2;
 
+                TRACE_THREAD("SYSCALL THREAD_SYNC_MUTEXATTR_GETPROTOCOL");
                 if (!user_attr || !protocol) return EINVAL;
                 *protocol = user_attr->protocol;
-                TRACE_THREAD("THREAD_SYNC_MUTEXATTR_GETPROTOCOL: protocol=%d, protocol addr is %p", *protocol, protocol);
                 return THREAD_SUCCESS;
             }
 
-        case THREAD_SYNC_SEM_INIT: {
-            struct semaphore *sem = (struct semaphore *)arg1;
-            TRACE_THREAD("THREAD_SYNC_SEM_INIT: count=%d", sem->count);
-            return thread_semaphore_init(sem, sem->count);
-        }            
-        case THREAD_SYNC_JOIN: // Join thread
-            TRACE_THREAD("JOIN: proc_thread_join called for tid=%ld", arg1);
+        case THREAD_SYNC_SEM_INIT:
+            /* 
+             * Actually no mintlib calls exists for this
+             * Semaphore is directly initialized in userspace
+            */
+            TRACE_THREAD("SYSCALL THREAD_SYNC_SEM_INIT");
+            return thread_semaphore_init((struct semaphore *)arg1);
+
+        case THREAD_SYNC_JOIN:
+            TRACE_THREAD("SYSCALL THREAD_SYNC_JOIN");
             return proc_thread_join(arg1, (void**)arg2);
             
-        case THREAD_SYNC_DETACH: // Detach thread
-            TRACE_THREAD("DETACH: proc_thread_detach called for tid=%ld", arg1);
+        case THREAD_SYNC_DETACH:
+            TRACE_THREAD("SYSCALL THREAD_SYNC_DETACH");
             return proc_thread_detach(arg1);
 
-        case THREAD_SYNC_TRYJOIN:
-            // TRACE_THREAD("TRY_JOIN: proc_thread_tryjoin called for tid=%ld", arg1);
-            // New non-blocking join
-            return proc_thread_tryjoin(arg1, (void **)arg2);
-
         case THREAD_SYNC_SLEEP:
+            TRACE_THREAD("SYSCALL THREAD_SYNC_SLEEP");
             return proc_thread_sleep((long)arg1);
 
         case THREAD_SYNC_YIELD:
+            TRACE_THREAD("SYSCALL THREAD_SYNC_YIELD");
             return proc_thread_yield();
 
         case THREAD_SYNC_COND_INIT:
-            TRACE_THREAD("THREAD_SYNC_COND_INIT");
+            TRACE_THREAD("SYSCALL THREAD_SYNC_COND_INIT");
             return proc_thread_condvar_init((struct condvar *)arg1);
             
         case THREAD_SYNC_COND_DESTROY:
-            TRACE_THREAD("THREAD_SYNC_COND_DESTROY");
+            TRACE_THREAD("SYSCALL THREAD_SYNC_COND_DESTROY");
             return proc_thread_condvar_destroy((struct condvar *)arg1);
             
         case THREAD_SYNC_COND_WAIT:
-            TRACE_THREAD("THREAD_SYNC_COND_WAIT");
+            TRACE_THREAD("SYSCALL THREAD_SYNC_COND_WAIT");
             return proc_thread_condvar_wait((struct condvar *)arg1, (struct mutex *)arg2);
             
         case THREAD_SYNC_COND_TIMEDWAIT:
-            TRACE_THREAD("THREAD_SYNC_COND_TIMEDWAIT");
-            return proc_thread_condvar_timedwait((struct condvar *)arg1, (struct mutex *)arg2, 
-                                          ((struct condvar *)arg1)->timeout_ms);
+            TRACE_THREAD("SYSCALL THREAD_SYNC_COND_TIMEDWAIT");
+            return proc_thread_condvar_timedwait((struct condvar *)arg1, (struct mutex *)arg2, ((struct condvar *)arg1)->timeout_ms);
             
         case THREAD_SYNC_COND_SIGNAL:
-            TRACE_THREAD("THREAD_SYNC_COND_SIGNAL");
+            TRACE_THREAD("SYSCALL THREAD_SYNC_COND_SIGNAL");
             return proc_thread_condvar_signal((struct condvar *)arg1);
             
         case THREAD_SYNC_COND_BROADCAST:
-            TRACE_THREAD("THREAD_SYNC_COND_BROADCAST");
+            TRACE_THREAD("SYSCALL THREAD_SYNC_COND_BROADCAST");
             return proc_thread_condvar_broadcast((struct condvar *)arg1);
 
         case THREAD_SYNC_CLEANUP_PUSH:
-            TRACE_THREAD("THREAD_SYNC_CLEANUP_PUSH: routine=%p, arg=%p", (void*)arg1, (void*)arg2);
+            TRACE_THREAD("SYSCALL THREAD_SYNC_CLEANUP_PUSH");
             return thread_cleanup_push((void (*)(void*))arg1, (void*)arg2);
             
         case THREAD_SYNC_CLEANUP_POP:
-            TRACE_THREAD("THREAD_SYNC_CLEANUP_POP: routine_ptr=%p, arg_ptr=%p", (void*)arg1, (void*)arg2);
+            TRACE_THREAD("SYSCALL THREAD_SYNC_CLEANUP_POP");
             return thread_cleanup_pop((void (**)(void*))arg1, (void**)arg2);
 
         case THREAD_SYNC_CLEANUP_GET:
-            TRACE_THREAD("THREAD_SYNC_CLEANUP_GET: handlers=%p, max_handlers=%ld", (void*)arg1, arg2);
+            TRACE_THREAD("SYSCALL THREAD_SYNC_CLEANUP_GET");
             return get_cleanup_handlers(CURTHREAD, (struct cleanup_info*)arg1, (int)arg2);
         
         case THREAD_TSD_CREATE_KEY:
+            TRACE_THREAD("SYSCALL THREAD_TSD_CREATE_KEY");
             return thread_key_create((void (*)(void*))arg1);
             
         case THREAD_TSD_DELETE_KEY:
+            TRACE_THREAD("SYSCALL THREAD_TSD_DELETE_KEY");
             return thread_key_delete(arg1);
             
         case THREAD_TSD_GET_SPECIFIC:
+            TRACE_THREAD("SYSCALL THREAD_TSD_GET_SPECIFIC");
             return (long)thread_getspecific(arg1);
             
         case THREAD_TSD_SET_SPECIFIC:
+            TRACE_THREAD("SYSCALL THREAD_TSD_SET_SPECIFIC");
             return thread_setspecific(arg1, (void*)arg2);
 
         case THREAD_SYNC_RWLOCK_INIT:
+            TRACE_THREAD("SYSCALL THREAD_SYNC_RWLOCK_INIT");
             return thread_rwlock_init();
 
         case THREAD_SYNC_RWLOCK_DESTROY:
+            TRACE_THREAD("SYSCALL THREAD_SYNC_RWLOCK_DESTROY");
             return thread_rwlock_destroy(arg1);
             
         case THREAD_SYNC_RWLOCK_RDLOCK:
+            TRACE_THREAD("SYSCALL THREAD_SYNC_RWLOCK_RDLOCK");
             return thread_rwlock_rdlock(arg1);
             
         case THREAD_SYNC_RWLOCK_TRYRDLOCK:
+            TRACE_THREAD("SYSCALL THREAD_SYNC_RWLOCK_TRYRDLOCK");
             return thread_rwlock_tryrdlock(arg1);
             
         case THREAD_SYNC_RWLOCK_WRLOCK:
+            TRACE_THREAD("SYSCALL THREAD_SYNC_RWLOCK_WRLOCK");
             return thread_rwlock_wrlock(arg1);
             
         case THREAD_SYNC_RWLOCK_TRYWRLOCK:
+            TRACE_THREAD("SYSCALL THREAD_SYNC_RWLOCK_TRYWRLOCK");
             return thread_rwlock_trywrlock(arg1);
             
         case THREAD_SYNC_RWLOCK_UNLOCK:
+            TRACE_THREAD("SYSCALL THREAD_SYNC_RWLOCK_UNLOCK");
             return thread_rwlock_unlock(arg1);
         
         default:
-            TRACE_THREAD("THREAD_SYNC_UNKNOWN: %d", operator);
+            TRACE_THREAD("SYSCALL THREAD_SYNC_UNKNOWN: %d", operator);
             return EINVAL;
+
     }
+
 }
 
 long _cdecl sys_p_pthread(long syscall_func, long arg1, long arg2, long arg3) {
-    
-    // TRACE_THREAD("IN KERNEL: sys_p_pthread: syscall_func=%ld, arg1=%ld, arg2=%ld, arg3=%ld", syscall_func, arg1, arg2, arg3);
+
+    TRACE_THREAD("SYSCALL - IN KERNEL: sys_p_pthread: CURPROC ID =%d, CURTHREAD ID =%d", curproc->pid, CURTHREAD ? CURTHREAD->tid : -1);
     
     switch (syscall_func) {
+
         case P_THREAD_CTRL:
+            TRACE_THREAD("SYSCALL P_THREAD_CTRL: arg1=%ld, arg2=%ld", arg1, arg2);
             return sys_p_thread_ctrl(arg1, arg2, arg3);
             
         case P_THREAD_SYNC:
+            TRACE_THREAD("SYSCALL P_THREAD_SYNC: arg1=%ld, arg2=%ld, arg3=%ld", arg1, arg2, arg3);
             return sys_p_thread_sync(arg1, arg2, arg3);
             
         case P_THREAD_SIGNAL:
+            TRACE_THREAD("SYSCALL P_THREAD_SIGNAL: arg1=%ld, arg2=%ld, arg3=%ld", arg1, arg2, arg3);
             return sys_p_thread_signal(arg1, arg2, arg3);
             
         case PSCHED_SETPARAM:
+            TRACE_THREAD("SYSCALL PSCHED_SETPARAM");
             return proc_thread_set_schedparam(arg1, arg2, arg3);
             
         case PSCHED_GETPARAM:
+            TRACE_THREAD("SYSCALL PSCHED_GETPARAM");
             return proc_thread_get_schedparam(arg1, (long*)arg2, (long*)arg3);
             
         case PSCHED_GETRRINTERVAL:
+            TRACE_THREAD("SYSCALL PSCHED_GETRRINTERVAL");
             return proc_thread_get_rrinterval(arg1, (long*)arg2);
             
         case PSCHED_SET_TIMESLICE:
+            TRACE_THREAD("SYSCALL PSCHED_SET_TIMESLICE");
             return proc_thread_set_timeslice(arg1, arg2);
             
         case PSCHED_GET_TIMESLICE:
+            TRACE_THREAD("SYSCALL PSCHED_GET_TIMESLICE");
             return proc_thread_get_timeslice(arg1, (long*)arg2, (long*)arg3);
 
         case THREAD_ATOMIC_INCREMENT:
+            TRACE_THREAD("SYSCALL THREAD_ATOMIC_INCREMENT");
             return !((volatile long *)arg1) ? EINVAL : atomic_increment((volatile long *)arg1);
             
         case THREAD_ATOMIC_DECREMENT:
+            TRACE_THREAD("SYSCALL THREAD_ATOMIC_DECREMENT");
             return !((volatile long *)arg1) ? EINVAL : atomic_decrement((volatile long *)arg1);
             
         case THREAD_ATOMIC_CAS:
+            TRACE_THREAD("SYSCALL THREAD_ATOMIC_CAS");
             return !((volatile long *)arg1) ? EINVAL : atomic_cas((volatile long *)arg1, arg2, arg3);
             
         case THREAD_ATOMIC_EXCHANGE:
+            TRACE_THREAD("SYSCALL THREAD_ATOMIC_EXCHANGE");
             return !((volatile long *)arg1) ? EINVAL : atomic_exchange((volatile long *)arg1, (long)arg2);
             
         case THREAD_ATOMIC_ADD:
+            TRACE_THREAD("SYSCALL THREAD_ATOMIC_ADD");
             return !((volatile long *)arg1) ? EINVAL : atomic_add((volatile long *)arg1, (long)arg2);
             
         case THREAD_ATOMIC_SUB:
+            TRACE_THREAD("SYSCALL THREAD_ATOMIC_SUB");
             return !((volatile long *)arg1) ? EINVAL : atomic_sub((volatile long *)arg1, (long)arg2);
             
         case THREAD_ATOMIC_OR:
+            TRACE_THREAD("SYSCALL THREAD_ATOMIC_OR");
             return !((volatile long *)arg1) ? EINVAL : atomic_or((volatile long *)arg1, (long)arg2);
             
         case THREAD_ATOMIC_AND:
+            TRACE_THREAD("SYSCALL THREAD_ATOMIC_AND");
             return !((volatile long *)arg1) ? EINVAL : atomic_and((volatile long *)arg1, (long)arg2);
             
         case THREAD_ATOMIC_XOR:
+            TRACE_THREAD("SYSCALL THREAD_ATOMIC_XOR");
             return !((volatile long *)arg1) ? EINVAL : atomic_xor((volatile long *)arg1, (long)arg2);
 
         case THREAD_ATOMIC_TAS:
-            // TRACE_THREAD("THREAD_ATOMIC_TAS: arg1=%p", (void *)arg1);
-            /* Validate pointer and alignment */
-            if (!arg1) {
-                return EINVAL;
-            }
-            if (arg1 & 1) {  /* Check for odd address */
-                TRACE_THREAD("THREAD_ATOMIC_TAS: Unaligned address %p", (void *)arg1);
-                return EINVAL;
-            }
-            return tas_try_lock((volatile unsigned short *)arg1);
+            TRACE_THREAD("SYSCALL THREAD_ATOMIC_TAS");
+            return !((volatile unsigned short *)arg1) ? EINVAL : atomic_tas_try_lock((volatile unsigned short *)arg1);
+
         default:
-            TRACE_THREAD("P_THREAD_UNKNOWN: %ld", syscall_func);
+            TRACE_THREAD("SYSCALL P_THREAD_UNKNOWN: %ld", syscall_func);
             return EINVAL;
     }
+
 }

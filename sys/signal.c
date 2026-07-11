@@ -304,6 +304,14 @@ check_sigs (void)
 	if (p->pid == 0)
 		return;
 
+	if(p->p_flag & P_FLAG_THREADED){
+		TRACE_THREAD("CHECK SIGS: Threaded process %d", p->pid);
+		TRACE_THREAD("CHECK SIGS: Current thread %d", p->current_thread->tid);
+		TRACE_THREAD("CHECK SIGS: Current thread signal mask %lx", p->current_thread->t_sigmask);
+		TRACE_THREAD("CHECK SIGS: Current thread pending signals %lx", p->current_thread->t_sigpending);
+		TRACE_THREAD("CHECK SIGS: Current process signal mask %lx", p->p_sigmask);
+		TRACE_THREAD("CHECK SIGS: Current process pending signals %lx", p->sigpending);
+	}
     /* If the process is a classic process (TID <= 0) and currently 
      * waiting in sigwaitinfo, do not dispatch signals here.
      * The sigwaitinfo system call will consume them upon waking. */
@@ -311,12 +319,12 @@ check_sigs (void)
         return;
     }
 
-	if (p->p_sigacts && p->p_sigacts->thread_signals && p->current_thread && p->current_thread->tid > 0) {
-		TRACE_THREAD("CHECK SIGS: Dispatching thread-specific signals for thread %d", p->current_thread->tid);
-		dispatch_thread_signals(p->current_thread);
-		/* Continue to process-level signals after thread dispatch */
-		TRACE_THREAD("CHECK SIGS: Continuing to process-level signal handling after thread dispatch");
-	}
+	// if (p->p_sigacts && p->p_sigacts->thread_signals && p->current_thread && p->current_thread->tid > 0) {
+	// 	TRACE_THREAD("CHECK SIGS: Dispatching thread-specific signals for thread %d", p->current_thread->tid);
+	// 	dispatch_thread_signals(p->current_thread);
+	// 	/* Continue to process-level signals after thread dispatch */
+	// 	TRACE_THREAD("CHECK SIGS: Continuing to process-level signal handling after thread dispatch");
+	// }
 top:
 	assert (p->p_sigacts);
 	

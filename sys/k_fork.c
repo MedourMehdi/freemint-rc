@@ -60,6 +60,8 @@ static int fork_setup_thread0(struct proc *parent, struct proc *child)
         return ENOSYS;
     }
     
+	TRACE_THREAD("FORK_CLONE: Setting up thread0 for child PID %d, confirm thread ID %d", child->pid, pt->tid);
+
     /* Allocate child thread0 */
     ct = kmalloc(sizeof(struct thread));
     if (!ct) return ENOMEM;
@@ -111,6 +113,12 @@ static int fork_setup_thread0(struct proc *parent, struct proc *child)
     ct->sig_wait_obj = NULL;
     memset(ct->sig_handlers, 0, sizeof(ct->sig_handlers));
     
+	/* Inherit thread-specific signal state */
+	ct->t_sigpending = pt->t_sigpending;
+	ct->t_sig_in_progress = pt->t_sig_in_progress;
+	ct->sig_wait_obj = pt->sig_wait_obj;
+	memcpy(ct->sig_handlers, pt->sig_handlers, sizeof(ct->sig_handlers));
+
     if (child->p_sigacts) {
         /* Disable thread signals for forked child */
         child->p_sigacts->thread_signals = 0;
@@ -208,6 +216,8 @@ fork_proc1 (struct proc *p1, long flags, long *err)
 	/* If parent is threaded, setup thread0 for child */
 	if (p1->current_thread) {
 		int result = fork_setup_thread0(p1, p2);
+		p2->current_thread->errno_ptr = p1->current_thread->errno_ptr;
+    	p2->current_thread->tsd_data = p1->current_thread->tsd_data;
 		if (result != 0) {
 			if (err) *err = result;
 			goto nomem;
@@ -227,10 +237,8 @@ fork_proc1 (struct proc *p1, long flags, long *err)
 	p2->idle_thread = NULL;
 
 	/* Thread timer initialization */
-	p2->p_thread_timer.thread_id = 0;
 	p2->p_thread_timer.enabled = 0;
 	p2->p_thread_timer.timeout = NULL;
-	p2->p_thread_timer.sr = 0;
 	p2->p_thread_timer.in_handler = 0;
 
 	/* Thread-specific data management */

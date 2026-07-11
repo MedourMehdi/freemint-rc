@@ -77,8 +77,8 @@ long proc_thread_detach(long tid)
         handle_thread_joining(target, NULL);
         
         // Free resources
-        TRACE_THREAD("DETACH: Calling cleanup_thread_resources for thread %d", target->tid);
-        cleanup_thread_resources(p, target, target->tid);
+        // TRACE_THREAD("DETACH: Calling cleanup_thread_resources for thread %d", target->tid);
+        // cleanup_thread_resources(p, target, target->tid);
     }
     
     spl(sr);
@@ -183,7 +183,6 @@ long proc_thread_join(long tid, void **retval)
     current->join_wait_obj = target;
     current->join_retval = retval;  // Store the pointer where to put the return value
     TRACE_THREAD("JOIN: Thread %d waiting for thread %d to exit, join_retval=%p", current->tid, target->tid, retval);
-    TRACE_THREAD_JOIN(current, target);
     
     // Block the current thread
     proc_thread_state_change(current, THREAD_STATE_BLOCKED);
@@ -200,11 +199,8 @@ long proc_thread_join(long tid, void **retval)
 
         ctx->regs[0] = 1;
 
-        TRACE_THREAD("JOIN: SAVED CURRENT Context for thread %d saved, SR=%x, SSP=%lx, USP=%lx, PC=%lx",
-                current->tid, ctx->sr, ctx->ssp, ctx->usp, ctx->pc);
         // memcpy(&current->ctxt[SYSCALL], &current->proc->ctxt[SYSCALL], sizeof(CONTEXT));
-        TRACE_THREAD("JOIN: SAVED SYSCALL CONTEXT: Thread %d context - SSP=%lx, USP=%lx, PC=%lx", current->tid, current->ctxt[SYSCALL].ssp, current->ctxt[SYSCALL].usp, current->ctxt[SYSCALL].pc);
-        // First time through - going to sleep
+        TRACE_THREAD("JOIN: SAVED SYSCALL CONTEXT: Thread %d context - SR=%x, SSP=%lx, USP=%lx, PC=%lx", current->tid, current->ctxt[SYSCALL].sr, current->ctxt[SYSCALL].ssp, current->ctxt[SYSCALL].usp, current->ctxt[SYSCALL].pc);
         // Schedule another thread
         proc_thread_schedule();
         
@@ -213,9 +209,9 @@ long proc_thread_join(long tid, void **retval)
         return -1;
     }
 
-    TRACE_THREAD("JOIN - Second time - CONTEXT: Thread %d context - SSP=%lx, USP=%lx, PC=%lx", current->tid, ctx->ssp, ctx->usp, ctx->pc);
+    TRACE_THREAD("JOIN: Second time, GETTING CONTEXT: Thread %d context - SSP=%lx, USP=%lx, PC=%lx", current->tid, ctx->ssp, ctx->usp, ctx->pc);
     TRACE_THREAD("JOIN: Second time context, THREAD SYSCALL context for thread %d SR = %x, SSP=%lx, USP=%lx, PC=%lx", current->tid, current->ctxt[SYSCALL].sr, current->ctxt[SYSCALL].ssp, current->ctxt[SYSCALL].usp, current->ctxt[SYSCALL].pc);                     
-    TRACE_THREAD("JOIN: Second time context, PROC SYSCALL context for proc %d SR = %x, SSP=%lx, USP=%lx, PC=%lx", current->proc->pid, current->proc->ctxt[SYSCALL].sr, current->proc->ctxt[SYSCALL].ssp, current->proc->ctxt[SYSCALL].usp, current->proc->ctxt[SYSCALL].pc);                
+    TRACE_THREAD("JOIN: Second time context, PROC SYSCALL context for proc %d SR = %x, SSP=%lx, USP=%lx, PC=%lx", current->proc->pid, current->proc->ctxt[SYSCALL].sr, current->proc->ctxt[SYSCALL].ssp, current->proc->ctxt[SYSCALL].usp, current->proc->ctxt[SYSCALL].pc);
     
     // Second time through - waking up after target thread exited
     sr = splhigh();
@@ -285,268 +281,6 @@ long proc_thread_join(long tid, void **retval)
 
     return 0;
 }
-
-/**
- * Try to join a thread - non-blocking version
- * 
- * @param tid Thread ID to join
- * @param retval Pointer to store the thread's return value
- * @return 0 on success (thread joined), -EAGAIN if thread still running, error code on failure
- */
-long proc_thread_tryjoin(long tid, void **retval)
-{
-    struct proc *p = curproc;
-    struct thread *current, *target = NULL;
-    register unsigned short sr;
-    
-    if (!p || !p->current_thread)
-        return EINVAL;
-    
-    current = p->current_thread;
-
-    // TRACE_THREAD("TRY_JOIN: proc_thread_tryjoin called for tid=%ld, retval=%p", tid, retval);
-
-    // Cannot join self - would deadlock
-    if (current->tid == tid) {
-        TRACE_THREAD("TRY_JOIN: Cannot join self (would deadlock)");
-        return EDEADLK;
-    }
-
-    // Find target thread
-    for (target = p->threads; target; target = target->next) {
-        if (target->tid == tid) {
-            break;
-        }
-    }
-    
-    if (!target) {
-        TRACE_THREAD("TRY_JOIN: Thread %ld not found", tid);
-        return ESRCH;
-    }
-    
-    // Check if thread is joinable
-    if (target->detached) {
-        TRACE_THREAD("TRY_JOIN: Thread %ld is detached, cannot join", tid);
-        return EINVAL;
-    }
-    
-    // Check if thread is already joined
-    if (target->joined) {
-        TRACE_THREAD("TRY_JOIN: Thread %ld is already joined", tid);
-        return EINVAL;
-    }
-    
-    // Check if another thread is already joining this thread
-    if (target->joiner && target->joiner != current && target->joiner->magic == CTXT_MAGIC) {
-        TRACE_THREAD("TRY_JOIN: Thread %ld is already being joined by thread %d", 
-                    tid, target->joiner->tid);
-        return EINVAL;  // Thread is already being joined by another thread
-    }
-
-    sr = splhigh();
-    
-    // KEY DIFFERENCE: Check if thread exited, but don't block if it hasn't
-    if (target->state & THREAD_STATE_EXITED) {
-        // Thread already exited, get return value and return immediately
-        if (retval) {
-            TRACE_THREAD("TRY_JOIN: Thread %ld already exited, getting return value %p", tid, target->retval);
-            *retval = target->retval;
-        }
-        
-        // Mark as joined so resources can be freed
-        target->joined = 1;
-        
-        // Free resources now
-        TRACE_THREAD("TRY_JOIN: Freeing resources for thread %ld", tid);
-        cleanup_thread_resources(p, target, tid);
-        
-        spl(sr);
-        TRACE_THREAD("TRY_JOIN: Thread %ld joined successfully", tid);
-        return 0;  // Success - thread was joined
-    }
-    
-    // Thread is still running - return immediately with EAGAIN
-    spl(sr);
-    // TRACE_THREAD("TRY_JOIN: Thread %ld still running", tid);
-    return EAGAIN;  // Thread still running, try again later
-}
-
-// Function to initialize a semaphore
-int thread_semaphore_init(struct semaphore *sem, short count) {
-    if (!sem || count < 0) {
-        return EINVAL;
-    }
-    
-    sem->count = count;
-    sem->wait_queue = NULL;
-    TRACE_THREAD("SEMAPHORE INIT: Count=%d", sem->count);
-    return THREAD_SUCCESS;
-}
-
-// Semaphore
-int thread_semaphore_down(struct semaphore *sem) {
-    /* Called as sem_wait() */
-    if (!sem) {
-        TRACE_THREAD("SEMAPHORE DOWN: Invalid semaphore");
-        return EINVAL;
-    }
-
-    struct thread *t = CURTHREAD;
-    if (!t) {
-        TRACE_THREAD("SEMAPHORE DOWN: No current thread");
-        return EINVAL;
-    }
-    TRACE_THREAD("SEMAPHORE DOWN: sem=%p, &sem->wait_queue=%p, sem->count=%d", 
-                sem, &sem->wait_queue, sem->count);
-    TRACE_THREAD("SEMAPHORE DOWN: t=%p, t->tid=%d, t->magic=%lx, t->next_wait=%p", 
-                t, t->tid, t->magic, t->next_wait);
-    // Prevent nested blocking
-    if (t->wait_type != WAIT_NONE) {
-        TRACE_THREAD("SEMAPHORE DOWN: Thread %d already blocked", t->tid);
-        return EDEADLK;
-    }
-
-    register unsigned short sr = splhigh();
-    
-    if (sem->count > 0) {
-        sem->count--;
-        TRACE_THREAD("SEMAPHORE DOWN: Decremented count to %d", sem->count);
-        spl(sr);
-        return THREAD_SUCCESS;
-    }
-    
-    TRACE_THREAD("SEMAPHORE DOWN: Count=%d", sem->count);
-    
-    // Block thread
-    t->wait_type |= WAIT_SEMAPHORE;
-    t->sem_wait_obj = sem;
-    
-    // TRACE_THREAD("SEMAPHORE DOWN: Block thread %d", t->tid);
-    
-    // Add to wait queue (FIFO for semaphores)
-    // TRACE_THREAD("SEMAPHORE DOWN: Adding thread %d to semaphore wait queue", t->tid);
-    // struct thread **pp = &sem->wait_queue;
-
-    // while (*pp) {
-    //     TRACE_THREAD("SEMAPHORE DOWN: Traversing wait queue, at thread %d", (*pp)->tid);
-    //     pp = &(*pp)->next_wait;
-    //     TRACE_THREAD("SEMAPHORE DOWN: Next wait queue pointer is %p", *pp);
-    // }
-    // TRACE_THREAD("SEMAPHORE DOWN: Found end of wait queue, adding thread %d", t->tid);
-    // *pp = t;
-
-    if(!sem->wait_queue) {
-        sem->wait_queue = t;
-    } else {
-        struct thread *iter = sem->wait_queue;
-        while(iter->next_wait) {
-            iter = iter->next_wait;
-        }
-        iter->next_wait = t;
-    }
-
-    // TRACE_THREAD("SEMAPHORE DOWN: Thread %d added to wait queue", t->tid);
-    t->next_wait = NULL;
-    // TRACE_THREAD("SEMAPHORE DOWN: Thread %d added to semaphore wait queue", t->tid);
-    proc_thread_state_change(t, THREAD_STATE_BLOCKED);
-
-    spl(sr);
-    
-    // Schedule another thread
-    TRACE_THREAD("SEMAPHORE DOWN: Scheduling another thread");
-    proc_thread_schedule();
-    TRACE_THREAD("SEMAPHORE DOWN: Woke up from semaphore wait");
-    // When we resume, check if we were sleeping
-    sr = splhigh();
-    TRACE_THREAD("SEMAPHORE DOWN: Woke up thread %d from semaphore wait", t->tid);
-    TRACE_THREAD("\tThread %d wait_type=%d", t->tid, t->wait_type);
-    TRACE_THREAD("\tThread %d sem_wait_obj=%p", t->tid, t->sem_wait_obj);
-    TRACE_THREAD("\tThread %d count=%d", t->tid, sem->count);
-    if (t->wait_type & WAIT_SLEEP) {
-        TRACE_THREAD("SEMAPHORE DOWN: Thread %d was sleeping, clearing sleep state", t->tid);
-        t->wait_type &= ~WAIT_SLEEP;
-        t->wakeup_time = 0;
-    }
-    
-    if (t->wait_type & WAIT_SEMAPHORE) {
-        TRACE_THREAD("SEMAPHORE DOWN: Thread %d woke up but still waiting!", t->tid);
-        t->wait_type &= ~WAIT_SEMAPHORE;
-        t->sem_wait_obj = NULL;
-    }
-    spl(sr);
-    TRACE_THREAD("SEMAPHORE DOWN: Thread %d successfully acquired semaphore", t->tid);
-    // When we resume, the semaphore has been decremented for us
-    return THREAD_SUCCESS;
-}
-
-int thread_semaphore_up(struct semaphore *sem) {
-    if (!sem) {
-        return EINVAL;
-    }
-    
-    struct thread *current = CURTHREAD;
-    if (!current) {
-        return EINVAL;
-    }
-    
-    register unsigned short sr = splhigh();
-    
-    // If no waiters, just increment count and return
-    if (!sem->wait_queue) {
-        sem->count++;
-        TRACE_THREAD("SEMAPHORE UP: No waiters, incremented count to %d", sem->count);
-        spl(sr);
-        return THREAD_SUCCESS;
-    }
-    
-    struct thread *prev_highest = NULL;
-    struct thread *highest = find_highest_priority_thread_in_queue(sem->wait_queue, &prev_highest);
-    
-    if (!highest) {
-        // No valid waiters, increment count
-        sem->count++;
-        TRACE_THREAD("SEMAPHORE UP: No valid waiters, incremented count to %d", sem->count);
-        spl(sr);
-        return THREAD_SUCCESS;
-    }
-    
-    // Remove from wait queue
-    if (prev_highest) {
-        prev_highest->next_wait = highest->next_wait;
-    } else {
-        sem->wait_queue = highest->next_wait;
-    }
-    highest->next_wait = NULL;
-    
-    TRACE_THREAD("SEMAPHORE UP: Waking thread %d (priority %d)", 
-                highest->tid, highest->priority);
-    
-    // Wake up thread
-    highest->wait_type &= ~WAIT_SEMAPHORE;
-    highest->sem_wait_obj = NULL;
-    
-    // Remove from sleep queue if needed
-    if (highest->wakeup_time > 0) {
-        highest->wakeup_time = 0;
-        remove_from_sleep_queue(highest->proc, highest);
-    }
-    
-    // Mark as ready and add to ready queue
-    proc_thread_state_change(highest, THREAD_STATE_READY);
-    add_to_ready_queue(highest);
-    
-    // Force immediate scheduling if higher priority
-    if (highest->priority > current->priority) {
-        TRACE_THREAD("SEMAPHORE UP: Forcing immediate schedule due to priority");
-        spl(sr);
-        proc_thread_schedule();
-        return THREAD_SUCCESS;
-    }
-    
-    spl(sr);
-    return THREAD_SUCCESS;
-}
-
 
 /**
  * Clean up thread synchronization states when a process terminates

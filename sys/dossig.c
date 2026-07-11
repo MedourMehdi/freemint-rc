@@ -198,7 +198,7 @@ sys_p_sigaction_ext(short sig, void (*handler)(int, siginfo_t *, void *))
     PROC *p = get_curproc();
     struct thread *t = CURTHREAD;
 
-	TRACE_THREAD("Psigaction_ext(%d, %p)", sig, handler);
+	TRACE_THREAD("SIGACTION: Psigaction_ext(%d, %p), pid %d, tid %d", sig, handler, p->pid, t ? t->tid : -1);
 
     if (sig < 1 || sig >= NSIG)
         return EBADARG;

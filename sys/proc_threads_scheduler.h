@@ -55,7 +55,7 @@ void thread_switch(struct thread *from, struct thread *to);
 void proc_thread_schedule(void);
 void proc_thread_exit(void *retval, void *arg);
 
-void thread_timer_start(struct proc *p, int thread_id);
+void thread_timer_start(struct proc *p);
 void thread_timer_stop(PROC *p);
 
 void reschedule_preemption_timer(PROC *p, long arg);

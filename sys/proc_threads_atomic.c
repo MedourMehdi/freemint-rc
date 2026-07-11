@@ -34,7 +34,7 @@
 
 #ifdef __mcoldfire__
 /* ColdFire version - limited instruction set */
-int tas_try_lock(volatile unsigned short *lock_word) {
+int atomic_tas_try_lock(volatile unsigned short *lock_word) {
     register unsigned char result;
     register unsigned short sr = splhigh();
     __asm__ volatile (
@@ -54,7 +54,7 @@ int tas_try_lock(volatile unsigned short *lock_word) {
 }
 #else
 /* Standard m68k version - single-cycle TAS */
-int tas_try_lock(volatile unsigned short *lock_word) {
+int atomic_tas_try_lock(volatile unsigned short *lock_word) {
     register unsigned char result;
     __asm__ volatile (
         "tas %1\n\t"        /* Test and set high byte of word */
@@ -240,7 +240,7 @@ inline void spinlock_lock(spinlock_t *lock) {
 
     /* Spin using TAS until we acquire the lock */
     /* Use yielding spinlock to avoid burning CPU cycles */
-    while (!tas_try_lock(&lock->locked)) {
+    while (!atomic_tas_try_lock(&lock->locked)) {
         /* Small delay before retry to reduce bus contention */
         MEMORY_BARRIER();        
         proc_thread_yield();
@@ -254,7 +254,7 @@ inline int spinlock_trylock(spinlock_t *lock) {
     struct thread *t = CURTHREAD;
     short tid = t ? t->tid : -1;
     
-    if (tas_try_lock(&lock->locked)) {
+    if (atomic_tas_try_lock(&lock->locked)) {
         lock->owner_tid = tid;
         MEMORY_BARRIER();
         return 1;  /* Success */

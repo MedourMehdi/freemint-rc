@@ -150,13 +150,15 @@ static inline void sync_sys_to_proc(struct thread *t) {
 /* Checks if current thread should be preempted and schedules another if so. */
 /******************************************************************************/
 void thread_preempt_handler(PROC *p, long arg) {
-    register unsigned short sr;
+    // register unsigned short sr;
     struct thread *thread_arg = (struct thread *)arg;
     struct thread *curr_thread;
-
+    // sr = splhigh();
     /* If not current process, reschedule the timeout */
     if (p != curproc) {
-        TRACE_THREAD("PREEMPT: Not current process, rescheduling timeout");
+        // spl(sr);
+        TRACE_THREAD("PREEMPT: looking for process id %d but current is %d, rescheduling timeout", p->pid, curproc->pid);
+        TRACE_THREAD("PREEMPT: Rescheduling preemption timer for process %d, prio is %d", p->pid, p->pri);
         reschedule_preemption_timer(p, (long)p->current_thread);
         return;
     }
@@ -168,6 +170,7 @@ void thread_preempt_handler(PROC *p, long arg) {
     if (!p->current_thread 
         // || !(p->p_flag & P_FLAG_THREADED)
     ) {
+        // spl(sr);
         TRACE_THREAD("PREEMPT: No current thread (process exiting), aborting");
         return;
     }
@@ -200,19 +203,20 @@ void thread_preempt_handler(PROC *p, long arg) {
     if (p->p_thread_timer.in_handler) {
         if (!p->p_thread_timer.enabled) {
             TRACE_THREAD("PREEMPT: Timer disabled, not rescheduling");
+            // spl(sr);
             return;
         }
+        // spl(sr);
         TRACE_THREAD("PREEMPT: Already in handler, rescheduling");
         reschedule_preemption_timer(p, (long)p->current_thread);
         return;
     }
     
     /* Mark handler as active */
-    sr = splhigh();
     p->p_thread_timer.in_handler = 1;
     p->p_thread_timer.timeout = NULL;
     curr_thread = p->current_thread;
-    spl(sr);
+    // spl(sr);
 
     TRACE_THREAD("PREEMPT: Current thread=%d, arg thread=%d", 
                 curr_thread ? curr_thread->tid : -1, 
@@ -467,12 +471,19 @@ void cleanup_thread_resources(struct proc *p, struct thread *t, int tid) {
     TRACE_THREAD("CLEANUP THREAD RESOURCES: Cleaning up resources for thread %d", tid);
 
     /* Clean up subsystems in order */
+    TRACE_THREAD("CLEANUP THREAD RESOURCES: Cleaning up thread sleep state");
     cleanup_thread_sleep_state(t);
+    TRACE_THREAD("CLEANUP THREAD RESOURCES: Cleaning up thread tsd");
+    cleanup_thread_tsd(t);    
+    TRACE_THREAD("CLEANUP THREAD RESOURCES: Cleaning up thread cancellation");
+    cleanup_thread_handlers(t);    
+    TRACE_THREAD("CLEANUP THREAD RESOURCES: Cleaning up thread stack");
     cleanup_signal_stack(p, (long)t);
+    TRACE_THREAD("CLEANUP THREAD RESOURCES: Cleaning up thread signals");
     cleanup_thread_signals(t);
-    cleanup_thread_handlers(t);
+    TRACE_THREAD("CLEANUP THREAD RESOURCES: Cleaning up thread cancellation");
     cleanup_thread_cancellation(t);
-    cleanup_thread_tsd(t);
+    TRACE_THREAD("CLEANUP THREAD RESOURCES: Cleaning up thread time outs");
     cancel_thread_timeouts(p, t);
 
     /* Clear thread signal state */
@@ -501,8 +512,15 @@ void cleanup_thread_resources(struct proc *p, struct thread *t, int tid) {
     }
     
     /* Clear current_thread pointer to prevent use-after-free */
-    if (p->current_thread == t) {
-        p->current_thread = NULL;
+    if (p->current_thread == t && t->tid != 0) {
+        /* Redirect to thread 0, never NULL — sendsig needs a valid current_thread */
+        struct thread *th;
+        for (th = p->threads; th; th = th->next) {
+            if (th->tid == 0 && th->magic == CTXT_MAGIC) {
+                p->current_thread = th;
+                break;
+            }
+        }
     }
     TRACE_THREAD("CLEANUP THREAD RESOURCES: Cleared current_thread pointer for thread %d", tid);
     
@@ -536,6 +554,7 @@ void proc_thread_exit(void *retval, void *arg) {
     struct proc *p = curproc;
     struct thread *current;
     struct thread *next_thread;
+    CONTEXT *to_ctx;
     static volatile unsigned char thread_exit_in_progress = 0;
     static volatile short exit_owner_tid = -1;
     short tid;
@@ -678,9 +697,13 @@ void proc_thread_exit(void *retval, void *arg) {
     TRACE_THREAD("EXIT: Found next thread %d to run after exit", 
                 next_thread ? next_thread->tid : -1);
     
-    if (!next_thread) {
+    if (!next_thread && tid != 0) {
         TRACE_THREAD("EXIT: Selecting Thread 0 as next thread to run");
         next_thread = get_main_thread(p);
+    }
+
+    if(!next_thread) {
+        TRACE_THREAD("EXIT: No threads to run");
     }
 
     /* Check cancellation for next thread */
@@ -691,7 +714,7 @@ void proc_thread_exit(void *retval, void *arg) {
     }
 
     /* Prepare next thread for running */
-    if (next_thread && next_thread->magic == CTXT_MAGIC && 
+    if (next_thread && 
         !(next_thread->state & THREAD_STATE_EXITED)) {
         TRACE_THREAD("EXIT: Will switch to thread %d", next_thread->tid);
         proc_thread_state_change(next_thread, THREAD_STATE_RUNNING);
@@ -710,13 +733,13 @@ void proc_thread_exit(void *retval, void *arg) {
                 current->ctxt[SYSCALL].pc, current->ctxt[SYSCALL].usp, 
                 current->ctxt[SYSCALL].ssp);
 
-    // if (current->tid == 0) {
-    //     sync_sys_from_proc(current);
-    // }
+    if (current->tid == 0) {
+        sync_sys_from_proc(current);
+    }
 
     TRACE_THREAD("EXIT: Synced syscall context for exiting thread %d", tid);
-    cleanup_thread_resources(p, current, tid);
-    TRACE_THREAD("EXIT: Cleaned up resources for exiting thread %d", tid);
+    // cleanup_thread_resources(p, current, tid);
+    // TRACE_THREAD("EXIT: Cleaned up resources for exiting thread %d", tid);
     TRACE_THREAD("Thread %d exited", tid);
     
     /* Clear exit in progress flag */
@@ -730,10 +753,21 @@ void proc_thread_exit(void *retval, void *arg) {
     // sync_sys_to_proc(next_thread);
 
     /* Update current thread */
-    p->current_thread = next_thread;
+    if(next_thread) {
+        TRACE_THREAD("EXIT: Switching to next thread %d", next_thread->tid);
+        p->current_thread = next_thread;
 
-    /* Switch to next thread (never returns) */
-    thread_switch(NULL, next_thread);
+        /* Switch to next thread (never returns) */
+        thread_switch(NULL, next_thread);        
+    }
+
+    TRACE_THREAD("EXIT: Exiting thread %d", tid);
+    /* Sync syscall context and update current thread */
+    p->current_thread = current;
+    sync_sys_to_proc(current);
+    to_ctx = get_thread_context(current);
+    if ((to_ctx->sr & 0x2000) == 0) leave_kernel();
+    change_context(to_ctx);
     
     /* Should NEVER reach here */
     TRACE_THREAD("CRITICAL ERROR: Returned from thread_switch after "
@@ -1074,10 +1108,12 @@ static void execute_thread_switch(struct thread_switch_context *ctx) {
     }
     
     /* Handle context switch based on thread state */
-    if ((ctx->from->wait_type & WAIT_SLEEP) || 
+    if (((ctx->from->wait_type & WAIT_SLEEP) || 
         (ctx->from->wait_type & WAIT_JOIN) || 
-        (ctx->from->state & THREAD_STATE_EXITED)) {
+        (ctx->from->wait_type & WAIT_SEMAPHORE) || 
+        (ctx->from->state & THREAD_STATE_EXITED)) ){
         
+        // if( (ctx->from->tid == 0) || !(ctx->from->wait_type & WAIT_SEMAPHORE) )
         sync_sys_from_proc(ctx->from);
 
         TRACE_THREAD("SWITCH: Thread %d is sleeping/joining/exited, skipping save", 
@@ -1087,10 +1123,10 @@ static void execute_thread_switch(struct thread_switch_context *ctx) {
         reset_thread_priority(ctx->to);
         reset_thread_switch_state();
 
-        TRACE_THREAD("SWITCH: Switched to context for thread %d, sr=%x, ssp=%lx, "
-                    "usp=%lx, pc=%lx", 
-                    ctx->to->tid, ctx->to_ctx->sr, ctx->to_ctx->ssp, 
-                    ctx->to_ctx->usp, ctx->to_ctx->pc);
+        TRACE_THREAD("SWITCH: Switched to context for thread %d, ssp=%lx, "
+                    "usp=%lx, pc=%lx, sr=%x", 
+                    ctx->to->tid, ctx->to_ctx->ssp, 
+                    ctx->to_ctx->usp, ctx->to_ctx->pc, ctx->to_ctx->sr);
 
         ctx->from->proc->current_thread = ctx->to;
         ctx->to->last_scheduled = get_system_ticks();
@@ -1358,7 +1394,7 @@ static void reset_thread_switch_state(void) {
 /******************************************************************************/
 /* thread_timer_start - Start thread timer for process                       */
 /******************************************************************************/
-void thread_timer_start(struct proc *p, int thread_id) {
+void thread_timer_start(struct proc *p) {
     register unsigned short sr;
     unsigned char retry_count = 0;
     
@@ -1405,7 +1441,6 @@ void thread_timer_start(struct proc *p, int thread_id) {
 
     /* Set the timeout argument to current thread */
     p->p_thread_timer.timeout->arg = (long)p->current_thread;
-    p->p_thread_timer.thread_id = p->current_thread->tid;
 
     /* Enable timer */
     p->p_thread_timer.enabled = 1;

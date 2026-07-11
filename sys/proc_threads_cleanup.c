@@ -222,6 +222,8 @@ void cleanup_thread_handlers(struct thread *t) {
     
     /* Clear the cleanup stack */
     t->cleanup_stack = NULL;
+    
+    TRACE_THREAD("cleanup_thread_handlers: cleaned up handlers for thread=%p\n", t);
 }
 
 /**

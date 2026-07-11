@@ -153,8 +153,9 @@
 // #define DEFAULT_SCHED_POLICY   SCHED_FIFO   /* Default scheduling policy */
 #define DEFAULT_SCHED_POLICY   SCHED_RR   /* Default scheduling policy */
 /* Current thread macro */
-#define CURTHREAD \
-    ((curproc && curproc->current_thread) ? curproc->current_thread : NULL)
+// #define CURTHREAD 
+//     ((curproc && curproc->current_thread) ? curproc->current_thread : NULL)
+#define CURTHREAD   curproc->current_thread
 
 /* ============================================================================
  * FUNCTION PROTOTYPES

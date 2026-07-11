@@ -161,7 +161,7 @@ void boost_thread_priority(struct thread *t, int boost_amount) {
     /* Reset CPU time when priority changes manually */
     reset_thread_cpu_time(t);
 
-    TRACE_THREAD_PRIORITY(t, t->original_priority, t->priority);
+    TRACE_THREAD("Boosting priority of thread %d by %d", t->tid, boost_amount);
 
     return;
 }
@@ -176,7 +176,7 @@ void reset_thread_priority(struct thread *t) {
         return;
     }
     
-    TRACE_THREAD_PRIORITY(t, t->priority, t->original_priority);
+    TRACE_THREAD("Resetting priority of thread %d", t->tid);
     
     t->priority = t->original_priority;
     t->priority_boost = 0;
@@ -395,7 +395,7 @@ void make_process_eligible(struct proc *p) {
  */
 void proc_thread_state_change(struct thread *t, int new_state) {
     if (!t) {
-        TRACE_THREAD_ERROR("Attempt to change state of NULL thread");
+        TRACE_THREAD("ERROR: Attemt to change thread state but no thread provided");
         return;
     }
 
@@ -406,18 +406,18 @@ void proc_thread_state_change(struct thread *t, int new_state) {
 
     /* Check if thread is valid */
     if (t->magic != CTXT_MAGIC) {
-        TRACE_THREAD_ERROR("Attempt to change state of invalid thread %d, magic=%lx", t->tid, t->magic);
+        TRACE_THREAD("ERROR: Attempt to change state of invalid thread %d, magic=%lx", t->tid, t->magic);
         return;
     }
 
     /* Prevent transitions from EXITED state */
     if ((t->state == THREAD_STATE_EXITED) && !(new_state == THREAD_STATE_EXITED)) {
-        TRACE_THREAD_ERROR("Attempt to change state of EXITED thread %d from %d to %d", t->tid, t->state, new_state);
+        TRACE_THREAD("ERROR : Attempt to change state of EXITED thread %d from %d to %d", t->tid, t->state, new_state);
         return;
     }
 
     // register unsigned short sr = splhigh();
-    TRACE_THREAD_STATE(t, t->state, new_state);
+    TRACE_THREAD("STATE CHANGED - thread pointer = %p, tid = %d, new_state=%d", t, t->tid, new_state);
     t->state = new_state;
     // spl(sr);
 }

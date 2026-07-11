@@ -30,7 +30,7 @@
  * Try to acquire lock using TAS instruction
  * @return 1 if lock acquired, 0 if already locked
  */
-int tas_try_lock(volatile unsigned short *lock_word);
+int atomic_tas_try_lock(volatile unsigned short *lock_word);
 
 /**
  * Release TAS lock
@@ -146,7 +146,7 @@ inline int atomic_increment(volatile long *value);
  * USAGE GUIDELINES
  * ============================================================================
  * 
- * TAS locks (tas_try_lock/tas_unlock):
+ * TAS locks (atomic_tas_try_lock/tas_unlock):
  *   - Fastest option - single instruction
  *   - No ownership tracking
  *   - Use for very short critical sections

@@ -81,6 +81,8 @@
 #define THREAD_SYNC_SEM_WAIT            1   /* Wait on semaphore (P operation) */
 #define THREAD_SYNC_SEM_POST            2   /* Signal semaphore (V operation) */
 #define THREAD_SYNC_SEM_INIT            3   /* Initialize semaphore */
+#define THREAD_SYNC_SEM_TRYWAIT         4   /* sem_trywait */
+#define THREAD_SYNC_SEM_TIMEDWAIT       5   /* sem_timedwait */
 
 /* --- Mutex Operations --- */
 #define THREAD_SYNC_MUTEX_INIT          10  /* Initialize mutex */
@@ -119,7 +121,6 @@
 /* --- Thread Lifecycle Operations --- */
 #define THREAD_SYNC_JOIN               50  /* Join thread and wait for termination */
 #define THREAD_SYNC_DETACH             51  /* Detach thread (make unjoinable) */
-#define THREAD_SYNC_TRYJOIN            52  /* Non-blocking join attempt */
 
 /* --- Thread Scheduling Operations --- */
 #define THREAD_SYNC_SLEEP              60  /* Sleep for specified milliseconds */

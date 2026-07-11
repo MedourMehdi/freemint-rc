@@ -172,15 +172,17 @@ void cleanup_thread_tsd(struct thread *t) {
     struct tsd_entry *tsd_head;
     
     if (!t || t->magic != CTXT_MAGIC) {
+        TRACE_THREAD("CLEANUP TSD: invalid thread\n");
         return;
     }
     
     p = t->proc;
     if (!p || !p->thread_keys) {
+        TRACE_THREAD("CLEANUP TSD: invalid process or TSD data not initialized\n");
         return;
     }
     
-    TRACE_THREAD("cleanup_thread_tsd: cleaning up thread=%p\n", t);
+    TRACE_THREAD("CLEANUP TSD: cleaning up thread=%p\n", t);
 
     if (t->tid == 0) {
         /* Thread0 uses process TSD data */
@@ -192,6 +194,7 @@ void cleanup_thread_tsd(struct thread *t) {
     
     /* Free TSD entries */
     if (tsd_head) {
+        TRACE_THREAD("CLEANUP TSD: freeing TSD entries for thread=%p\n", t);
         free_tsd_entries(tsd_head);
         t->tsd_data = NULL;
     }

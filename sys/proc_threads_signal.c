@@ -1142,8 +1142,10 @@ void cleanup_thread_signals(struct thread *t)
         t->sig_stack = NULL;
     }
 
+    TRACE_THREAD("CLEANUP THREAD SIGNALS: thread %d cleaned up", t->tid);
     /* Clean up thread signal queue */
     cleanup_thread_sigqueue(t);
+    TRACE_THREAD("CLEANUP THREAD SIGNALS: thread %d signal queue cleaned up", t->tid);
         
     return;
 }
@@ -1244,7 +1246,7 @@ void cleanup_signal_stack(PROC *p, long arg)
     struct thread *t = (struct thread *)arg;
     
     if (!t || t->magic != CTXT_MAGIC) {
-        TRACE_THREAD("cleanup_signal_stack: Invalid thread pointer");
+        TRACE_THREAD("CLEANUP SIGNAL STACK: Invalid thread pointer");
         return;
     }
         
@@ -1252,8 +1254,9 @@ void cleanup_signal_stack(PROC *p, long arg)
         void *stack_to_free = t->sig_stack;
         t->sig_stack = NULL;
         kfree(stack_to_free);
-        TRACE_THREAD("Freed signal stack for thread %d", t->tid);
+        TRACE_THREAD("CLEANUP SIGNAL STACK: Freed signal stack for thread %d", t->tid);
     }
+    return;
 }
 
 /*
