@@ -205,7 +205,7 @@ struct thread *get_highest_priority_thread(struct proc *p)
     struct thread *best_other = NULL, *alt_other = NULL;
     struct thread *best_idle = NULL;
     short best_rt_pri = -1, best_other_pri = -1, best_idle_pri = -1;
-    unsigned short effective_pri;
+    short effective_pri;
     unsigned long now;
     struct thread *current = CURTHREAD;
 
@@ -293,7 +293,7 @@ struct thread *get_highest_priority_thread_excluding(struct proc *p, struct thre
     struct thread *t;
     struct thread *best_rt = NULL, *best_other = NULL, *best_idle = NULL;
     short best_rt_pri = -1, best_other_pri = -1, best_idle_pri = -1;
-    unsigned short effective_pri;
+    short effective_pri;
     unsigned long now;
 
     if (!p || !p->ready_queue) {
