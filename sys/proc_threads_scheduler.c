@@ -492,7 +492,7 @@ void cleanup_thread_resources(struct proc *p, struct thread *t, int tid) {
     cleanup_thread_signals(t);
     TRACE_THREAD("CLEANUP THREAD RESOURCES: Cleaning up thread cancellation");
     cleanup_thread_cancellation(t);
-    TRACE_THREAD("CLEANUP THREAD RESOURCES: Cleaning up thread time outs");
+    TRACE_THREAD("CLEANUP THREAD RESOURCES: Cleaning up thread timeouts");
     cancel_thread_timeouts(p, t);
 
     /* Clear thread signal state */
@@ -746,20 +746,12 @@ void proc_thread_exit(void *retval, void *arg) {
         sync_sys_from_proc(current);
     }
 
-    TRACE_THREAD("EXIT: Synced syscall context for exiting thread %d", tid);
     cleanup_thread_resources(p, current, tid);
-    // TRACE_THREAD("EXIT: Cleaned up resources for exiting thread %d", tid);
     TRACE_THREAD("Thread %d exited", tid);
     
     /* Clear exit in progress flag */
     thread_exit_in_progress = 0;
     exit_owner_tid = -1;
-
-    /* Should be handled by thread_switch(NULL, next_thread); */
-    // /* Sync syscall context and update current thread */
-    // TRACE_THREAD("EXIT: Syncing syscall context for next thread %d", 
-    //             next_thread->tid);
-    // sync_sys_to_proc(next_thread);
 
     /* Update current thread */
     if(next_thread) {
@@ -770,7 +762,7 @@ void proc_thread_exit(void *retval, void *arg) {
         thread_switch(NULL, next_thread);        
     }
 
-    TRACE_THREAD("EXIT: Exiting thread %d", tid);
+    TRACE_THREAD("EXIT: There isn't next thread to switch to, exiting thread %d", tid);
     /* Sync syscall context and update current thread */
     p->current_thread = current;
     sync_sys_to_proc(current);
@@ -828,13 +820,6 @@ static inline short should_schedule_thread(struct thread *current,
                     "preempted by normal thread %d", next->tid);
         return 1;
     }
-    
-    // /* Special case: thread0 preemptible by other non-idle threads */
-    // if (current->tid == 0 && next->tid > 0) {
-    //     TRACE_THREAD("THREAD_SCHED (should_schedule_thread): thread0 is "
-    //                 "current, allowing switch to thread %d", next->tid);
-    //     return 1;
-    // }
 
     /* If current thread not running, always schedule next */
     if ((current->state != THREAD_STATE_RUNNING) || 
@@ -924,11 +909,11 @@ void thread_switch(struct thread *from, struct thread *to) {
     struct thread_switch_context ctx;
     CONTEXT *to_ctx;
     
-    TRACE_THREAD("SWITCH: In function thread_switch");
+    TRACE_THREAD("SWITCH (thread_switch): In function thread_switch");
     
     /* Fast validation first */
     if (!to) {
-        TRACE_THREAD("SWITCH: Invalid destination thread pointer");
+        TRACE_THREAD("SWITCH (thread_switch): Invalid destination thread pointer");
         return;
     }
     
@@ -936,7 +921,7 @@ void thread_switch(struct thread *from, struct thread *to) {
     if (!from) {
         to_ctx = get_thread_context(to);
         
-        TRACE_THREAD("SWITCH: Switching to thread %d (no source thread)", to->tid);
+        TRACE_THREAD("SWITCH (thread_switch): Switching to thread %d (no source thread)", to->tid);
 
         reset_thread_priority(to);
 
@@ -947,13 +932,13 @@ void thread_switch(struct thread *from, struct thread *to) {
 
         if ((to_ctx->sr & 0x2000) == 0) leave_kernel();
         change_context(to_ctx);
-        TRACE_THREAD("SWITCH ERROR: Should not reach here");
+        TRACE_THREAD("SWITCH ERROR (thread_switch): Should not reach here");
         return;
     }
     
     /* Special case: switching to self with signal pending */
     if (from == to && to->t_sig_in_progress && to->has_run) {
-        TRACE_THREAD("SWITCH: Self-switch with signal in progress for thread %d", to->tid);
+        TRACE_THREAD("SWITCH (thread_switch): Self-switch with signal in progress for thread %d", to->tid);
         
         CONTEXT *sig_ctx = &to->sig_ctx;
         CONTEXT *saved_ctx = &to->saved_ctx;
@@ -967,18 +952,18 @@ void thread_switch(struct thread *from, struct thread *to) {
                 memcpy(&to->proc->ctxt[SYSCALL], sig_ctx, sizeof(CONTEXT));
             }
             to->last_scheduled = get_system_ticks();
-            TRACE_THREAD("SWITCH: Saved signal context successfully for thread %d", to->tid);
+            TRACE_THREAD("SWITCH (thread_switch): Saved signal context successfully for thread %d", to->tid);
             if((sig_ctx->sr & 0x2000) == 0) leave_kernel();
             change_context(sig_ctx);
             return;
         }
         
-        TRACE_THREAD("SWITCH ERROR: Should not return from signal context!");
+        TRACE_THREAD("SWITCH ERROR (thread_switch): Should not return from signal context!");
         return;
     }
 
     if (from == to) {
-        TRACE_THREAD("SWITCH: Source and destination threads are the same");
+        TRACE_THREAD("SWITCH (thread_switch): Source and destination threads are the same");
         return;
     }
     
@@ -1002,13 +987,13 @@ void thread_switch(struct thread *from, struct thread *to) {
 /* prepare_thread_switch - Prepare thread switch outside critical section    */
 /******************************************************************************/
 static void prepare_thread_switch(struct thread_switch_context *ctx) {
-    TRACE_THREAD("SWITCH: Preparing switch from %d to %d", 
+    TRACE_THREAD("SWITCH (prepare_thread_switch): Preparing switch from %d to %d", 
                 ctx->from->tid, ctx->to->tid);
     
     /* Check magic numbers and states in one go */
     if (ctx->from->magic != CTXT_MAGIC || ctx->to->magic != CTXT_MAGIC ||
         (ctx->from->state & THREAD_STATE_EXITED) || (ctx->to->state & THREAD_STATE_EXITED)) {
-        TRACE_THREAD("SWITCH: Invalid thread magic or exited state: from=%d, to=%d", 
+        TRACE_THREAD("SWITCH  (prepare_thread_switch): Invalid thread magic or exited state: from=%d, to=%d", 
                     ctx->from->tid, ctx->to->tid);
         ctx->to = NULL;
         return;
@@ -1017,7 +1002,7 @@ static void prepare_thread_switch(struct thread_switch_context *ctx) {
     /* Special handling for thread0 */
     if (ctx->from->tid == 0 && (ctx->from->state & THREAD_STATE_EXITED) && 
         ctx->from->proc->num_threads > 1) {
-        TRACE_THREAD("SWITCH: Preventing thread0 exit while other threads running");
+        TRACE_THREAD("SWITCH  (prepare_thread_switch): Preventing thread0 exit while other threads running");
         proc_thread_state_change(ctx->from, THREAD_STATE_READY);
         ctx->to = NULL;
         return;
@@ -1025,7 +1010,7 @@ static void prepare_thread_switch(struct thread_switch_context *ctx) {
     
     /* Verify stack integrity */
     if (ctx->from->stack_magic != STACK_MAGIC || ctx->to->stack_magic != STACK_MAGIC) {
-        TRACE_THREAD("SWITCH ERROR: Stack corruption detected!");
+        TRACE_THREAD("SWITCH ERROR (prepare_thread_switch): Stack corruption detected!");
         ctx->to = NULL;
         return;
     }
@@ -1033,7 +1018,7 @@ static void prepare_thread_switch(struct thread_switch_context *ctx) {
     /* Get destination context once */
     ctx->to_ctx = get_thread_context(ctx->to);
     if (!ctx->to_ctx) {
-        TRACE_THREAD("SWITCH: Failed to get context for thread %d", ctx->to->tid);
+        TRACE_THREAD("SWITCH (prepare_thread_switch): Failed to get context for thread %d", ctx->to->tid);
         ctx->to = NULL;
         return;
     }
@@ -1051,7 +1036,7 @@ static void execute_thread_switch(struct thread_switch_context *ctx) {
 
     /* Check if another switch is in progress */
     if (thread_switch_in_progress) {
-        TRACE_THREAD("SWITCH: Another switch in progress, aborting");
+        TRACE_THREAD("SWITCH (execute_thread_switch): Another switch in progress, aborting");
         spl(sr);
         return;
     }
@@ -1064,13 +1049,14 @@ static void execute_thread_switch(struct thread_switch_context *ctx) {
     
     update_thread_cpu_time(ctx->from);
 
-    TRACE_THREAD("SWITCH: Thread %d to %d scheduled at %lu (was %lu)", 
+    TRACE_THREAD("SWITCH (execute_thread_switch): Thread %d to %d scheduled at %lu (was %lu)", 
                 ctx->from->tid, ctx->to->tid, now, ctx->to->last_scheduled);
 
     /* Reset priority boost if needed */
     if ((ctx->from->priority_boost && 
-         (now - ctx->from->last_scheduled) > ctx->from->proc->thread_min_timeslice) 
-        && (ctx->from->wait_type == WAIT_NONE)) {
+         (now - ctx->from->last_scheduled) > ctx->from->proc->thread_min_timeslice) &&
+         (ctx->from->wait_type == WAIT_NONE)) {
+        TRACE_THREAD("SWITCH (execute_thread_switch): Resetting priority boost for thread %d", ctx->from->tid);
         reset_thread_priority(ctx->from);
     }
     
@@ -1083,7 +1069,7 @@ static void execute_thread_switch(struct thread_switch_context *ctx) {
             if (THREAD_SIGPENDING(ctx->to) & (1UL << sig)) {
                 /* Check thread handler first */
                 if (ctx->to->sig_handlers[sig].handler) {
-                    TRACE_THREAD("SWITCH: Thread %d has handler for pending signal %d", 
+                    TRACE_THREAD("SWITCH (execute_thread_switch): Thread %d has handler for pending signal %d", 
                                 ctx->to->tid, sig);
                     has_pending = 1;
                     break;
@@ -1091,7 +1077,7 @@ static void execute_thread_switch(struct thread_switch_context *ctx) {
                 /* Check process handler */
                 struct sigaction *sa = &SIGACTION(ctx->to->proc, sig);
                 if (sa->sa_handler != SIG_DFL && sa->sa_handler != SIG_IGN) {
-                    TRACE_THREAD("SWITCH: Process %d has handler for pending signal %d", 
+                    TRACE_THREAD("SWITCH (execute_thread_switch): Process %d has handler for pending signal %d", 
                                 ctx->to->proc->pid, sig);
                     has_pending = 1;
                     break;
@@ -1101,21 +1087,21 @@ static void execute_thread_switch(struct thread_switch_context *ctx) {
         
         if (has_pending) {
             spl(sr);
-            TRACE_THREAD("SWITCH: Dispatching signals for thread %d (has handler)", 
+            TRACE_THREAD("SWITCH (execute_thread_switch): Dispatching signals for thread %d (has handler)", 
                         ctx->to->tid);
             dispatch_thread_signals(ctx->to);
-            TRACE_THREAD("SWITCH: Returned from dispatch_thread_signals for thread %d, "
+            TRACE_THREAD("SWITCH (execute_thread_switch): Returned from dispatch_thread_signals for thread %d, "
                         "pending=%d, in_progress=%d", 
                         ctx->to->tid, ctx->to->t_sigpending, 
                         ctx->to->t_sig_in_progress);
             sr = splhigh();
             /* Refresh context after signal dispatch */
             if (ctx->to->t_sig_in_progress) {
-                TRACE_THREAD("SWITCH: Signal handler active, switching to signal context");
+                TRACE_THREAD("SWITCH (execute_thread_switch): Signal handler active, switching to signal context");
                 ctx->to_ctx = get_thread_context(ctx->to);
             }
         } else {
-            TRACE_THREAD("SWITCH: Thread %d has pending signals but no handlers yet", 
+            TRACE_THREAD("SWITCH (execute_thread_switch): Thread %d has pending signals but no handlers yet", 
                         ctx->to->tid);
         }
     }
@@ -1129,14 +1115,14 @@ static void execute_thread_switch(struct thread_switch_context *ctx) {
         // if( (ctx->from->tid == 0) || !(ctx->from->wait_type & WAIT_SEMAPHORE) )
         sync_sys_from_proc(ctx->from);
 
-        TRACE_THREAD("SWITCH: Thread %d is sleeping/joining/exited, skipping save", 
+        TRACE_THREAD("SWITCH (execute_thread_switch): Thread %d is sleeping/joining/exited or has semaphore, skipping save", 
                     ctx->from->tid);
 
         proc_thread_state_change(ctx->to, THREAD_STATE_RUNNING);
         reset_thread_priority(ctx->to);
         reset_thread_switch_state();
 
-        TRACE_THREAD("SWITCH: Switched to context for thread %d, ssp=%lx, "
+        TRACE_THREAD("SWITCH (execute_thread_switch): Switched to context for thread %d, ssp=%lx, "
                     "usp=%lx, pc=%lx, sr=%x", 
                     ctx->to->tid, ctx->to_ctx->ssp, 
                     ctx->to_ctx->usp, ctx->to_ctx->pc, ctx->to_ctx->sr);
@@ -1151,7 +1137,7 @@ static void execute_thread_switch(struct thread_switch_context *ctx) {
         if ((ctx->to_ctx->sr & 0x2000) == 0) leave_kernel();
         change_context(ctx->to_ctx);
         
-        TRACE_THREAD("SWITCH ERROR: Should not reach here!");
+        TRACE_THREAD("SWITCH ERROR (execute_thread_switch): Should not reach here!");
     } else {
 
         /* Thread is running - save context before switching */
@@ -1161,7 +1147,7 @@ static void execute_thread_switch(struct thread_switch_context *ctx) {
 
         from_ctx = get_thread_context(ctx->from);
 
-        TRACE_THREAD("PRE-SAVE -> CONTEXT: Thread %d context - SSP=%lx, USP=%lx, PC=%lx", 
+        TRACE_THREAD("SWITCH (execute_thread_switch): Thread %d context - SSP=%lx, USP=%lx, PC=%lx", 
                     ctx->from->tid, from_ctx->ssp, from_ctx->usp, from_ctx->pc);
 
         if (save_context(from_ctx) == 0) {
@@ -1177,7 +1163,7 @@ static void execute_thread_switch(struct thread_switch_context *ctx) {
                 add_to_ready_queue(ctx->from);
             }
 
-            TRACE_THREAD("SWITCH: FIRST TIME - Saved context for thread %d, "
+            TRACE_THREAD("SWITCH (execute_thread_switch): Saved context for thread %d, "
                         "ssp=%lx, usp=%lx, pc=%lx, sr=%x, to=%d",
                         ctx->from->tid, from_ctx->ssp, from_ctx->usp,
                         from_ctx->pc, from_ctx->sr, ctx->to->tid);
@@ -1196,13 +1182,13 @@ static void execute_thread_switch(struct thread_switch_context *ctx) {
             if ((ctx->to_ctx->sr & 0x2000) == 0) leave_kernel();
             change_context(ctx->to_ctx);
 
-            TRACE_THREAD("SWITCH ERROR: Should not reach here!");
+            TRACE_THREAD("SWITCH ERROR (execute_thread_switch): Should not reach here!");
         }
 
         /* RETURN PATH: thread resumed after context switch */
         reset_thread_switch_state();
 
-        TRACE_THREAD("SWITCH: Changed context after save for thread %d, "
+        TRACE_THREAD("SWITCH (execute_thread_switch): Changed context after save for thread %d, "
                     "IN_DOS=%x, IN_KERNEL=%x",
                     CURTHREAD->tid, CURTHREAD->proc->in_dos, in_kernel);
     }
@@ -1224,13 +1210,13 @@ static int prepare_scheduling_decision(struct proc *p,
         check_and_wake_sleeping_threads(p);
     }
 
-    TRACE_THREAD("SCHED: Current thread id=%d state=%d wait_type=%02x", 
+    TRACE_THREAD("SCHED (prepare_scheduling_decision): Current thread id=%d state=%d wait_type=%02x", 
                 decision->current_thread->tid,
                 decision->current_thread->state, 
                 decision->current_thread->wait_type);
     
     if (decision->current_thread->wait_type) {
-        TRACE_THREAD("SCHED: Thread %d is waiting on: %s", 
+        TRACE_THREAD("SCHED (prepare_scheduling_decision): Thread %d is waiting on: %s", 
                      decision->current_thread->tid,
                      (decision->current_thread->wait_type & WAIT_MUTEX) ? "MUTEX" :
                      (decision->current_thread->wait_type & WAIT_CONDVAR) ? "CONDVAR" :
@@ -1243,21 +1229,23 @@ static int prepare_scheduling_decision(struct proc *p,
 
     if (decision->current_thread->t_sig_in_progress && 
         !(decision->current_thread->state & THREAD_STATE_BLOCKED)) {
+        TRACE_THREAD("SCHED (prepare_scheduling_decision): Thread %d has signal pending", 
+                        decision->current_thread->tid);
         decision->next_thread = decision->current_thread;
     } else {
         /* Get highest priority thread from ready queue */
-        TRACE_THREAD("SCHED: Getting highest priority thread");
+        TRACE_THREAD("SCHED (prepare_scheduling_decision): Getting highest priority thread");
         decision->next_thread = get_highest_priority_thread(p);
     }
 
-    TRACE_THREAD("SCHED: Next thread id=%d state=%d wait_type=%02x", 
+    TRACE_THREAD("SCHED (prepare_scheduling_decision): Next thread id=%d state=%d wait_type=%02x", 
                 decision->next_thread ? decision->next_thread->tid : -1,
                 decision->next_thread ? decision->next_thread->state : -1, 
                 decision->next_thread ? decision->next_thread->wait_type : 0);
     /* Validate next thread */
     if (decision->next_thread && (decision->next_thread->magic != CTXT_MAGIC || 
                                  (decision->next_thread->state & THREAD_STATE_EXITED))) {
-        TRACE_THREAD("SCHED: Next thread %d is invalid or exited, removing from ready queue", 
+        TRACE_THREAD("SCHED (prepare_scheduling_decision): Next thread %d is invalid or exited, removing from ready queue", 
                     decision->next_thread->tid);
         remove_from_ready_queue(decision->next_thread);
         decision->next_thread = NULL;
@@ -1271,19 +1259,19 @@ static int prepare_scheduling_decision(struct proc *p,
         if (thread0 && !(thread0->state & THREAD_STATE_EXITED) && 
             (thread0->wait_type == WAIT_NONE)) {
             decision->next_thread = thread0;
-            TRACE_THREAD("SCHED: Falling back to thread0");
+            TRACE_THREAD("SCHED (prepare_scheduling_decision): Falling back to thread0");
         } else if (decision->current_thread && 
                    !(decision->current_thread->state & THREAD_STATE_BLOCKED) && 
                    !decision->current_thread->is_idle) {
-            TRACE_THREAD("SCHED: Continuing with current thread %d",  
+            TRACE_THREAD("SCHED (prepare_scheduling_decision): Continuing with current thread %d",  
                         decision->current_thread->tid);
             return 0; /* No switch needed */
         } else if (p->num_threads > 1 && thread0 && 
                    (thread0->wait_type & WAIT_JOIN)) {
-            TRACE_THREAD("SCHED: No threads available, falling back to idle thread");
+            TRACE_THREAD("SCHED (prepare_scheduling_decision): No threads available, falling back to idle thread");
             decision->next_thread = get_idle_thread(p);
         } else {
-            TRACE_THREAD("SCHED: No threads available");
+            TRACE_THREAD("SCHED (prepare_scheduling_decision): No threads available");
             return 0;
         }
     }
@@ -1304,16 +1292,18 @@ static void execute_scheduling_decision(struct proc *p,
     struct mutex *m;
 
     if (!decision->should_switch || !decision->next_thread) {
-        TRACE_THREAD("SCHED: No switch needed");
+        TRACE_THREAD("SCHED (execute_scheduling_decision): No switch needed");
         return;
     }
 
-    TRACE_THREAD("SCHED: Executing switch from %d to %d",
+    TRACE_THREAD("SCHED (execute_scheduling_decision): Executing switch from %d to %d",
                 decision->current_thread ? decision->current_thread->tid : -1,
                 decision->next_thread->tid);
 
+    #if THREAD_DEBUG_LEVEL >= THREAD_DEBUG_VERBOSE
     trace_ready_queue_dump(p, "PRE-SWITCH");
-
+    #endif
+    
     /* Remove next from ready queue if it's there */
     if (is_in_ready_queue(decision->next_thread)) {
         remove_from_ready_queue(decision->next_thread);
