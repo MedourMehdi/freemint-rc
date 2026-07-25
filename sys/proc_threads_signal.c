@@ -959,7 +959,9 @@ long _cdecl proc_thread_signal_sigwait(ulong mask, long timeout)
     }
 
     remove_from_ready_queue(t);
+    TRACE_THREAD_VERBOSE("SIGWAIT: Calling proc_thread_schedule()");
     proc_thread_schedule();
+    TRACE_THREAD_VERBOSE("SIGWAIT: Back from proc_thread_schedule()");
 
     /* After wakeup */
     if (CURTHREAD != t) {
@@ -1066,6 +1068,7 @@ long _cdecl proc_thread_signal_sigblock(ulong mask)
     /* Merge assignment to add signals to mask, excluding unmaskable ones */
     THREAD_SIGMASK_ADD(t, mask);
     if ( t->tid == 0) {
+        TRACE_THREAD("proc_thread_signal_sigblock: thread0 - adding to process mask to 0x%lx", mask);
         PROC_SIGMASK_ADD(t, mask);
     }
     TRACE_THREAD("proc_thread_signal_sigblock: TID=%d, added mask=0x%lx, new_mask=0x%lx",
@@ -1358,8 +1361,9 @@ long _cdecl proc_thread_sigreturn(void)
             return 0;
         }
     }
-
+    TRACE_THREAD_VERBOSE("SIGRETURN: Calling proc_thread_schedule()");
     proc_thread_schedule();
+    TRACE_THREAD_VERBOSE("SIGRETURN: Returned from proc_thread_schedule()");
     
     /* Should never reach here */
     TRACE_THREAD("SIGRETURN ERROR: Returned from change_context!");

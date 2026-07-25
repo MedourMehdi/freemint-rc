@@ -57,10 +57,13 @@ static inline unsigned long fast_ms_to_ticks(long ms) {
  * Runs from timer interrupt - MUST BE FAST
  */
 int wake_threads_by_time(struct proc *p, unsigned long current_time) {
+
     if (!p || !p->sleep_queue) {
         return 0;
     }
-    
+
+    register unsigned short sr = splhigh();
+
     /* Track highest priority wakeable thread */
     struct thread *highest_thread = NULL;
     struct thread **highest_prev = NULL;
@@ -90,6 +93,7 @@ int wake_threads_by_time(struct proc *p, unsigned long current_time) {
     }
     
     if (!highest_thread) {
+        spl(sr);
         return 0;
     }
     
@@ -102,6 +106,7 @@ int wake_threads_by_time(struct proc *p, unsigned long current_time) {
     
     /* Check for cancellation before waking */
     if (t->cancel_pending && t->cancel_state == PTHREAD_CANCEL_ENABLE) {
+        spl(sr);
         check_thread_cancellation(t);
     } else {
         /* Remove from sleep queue using tracked pointer */
@@ -121,6 +126,7 @@ int wake_threads_by_time(struct proc *p, unsigned long current_time) {
         t->wait_type &= ~WAIT_SLEEP;
         t->wakeup_time = 0;
         proc_thread_state_change(t, THREAD_STATE_READY);
+        spl(sr);
         add_to_ready_queue(t);
         woken++;
         
@@ -179,7 +185,9 @@ void proc_thread_sleep_wakeup_handler(PROC *p, long arg) {
     add_to_ready_queue(t);
 
     if(curproc == p) {
+        TRACE_THREAD_VERBOSE("SLEEP_WAKEUP: Calling proc_thread_schedule()");
         proc_thread_schedule();
+        TRACE_THREAD_VERBOSE("SLEEP_WAKEUP: Back from proc_thread_schedule()");
     }
 }
 
@@ -212,7 +220,8 @@ void cleanup_thread_sleep_state(struct thread *t) {
 long proc_thread_sleep(long ms) {
     struct proc *p = curproc;
     struct thread *t = p ? p->current_thread : NULL;
-    
+    register unsigned short sr;
+
     if (!p || !t) return EINVAL;
     if (t->tid == 0) return EINVAL;
     if (ms <= 0) {
@@ -233,26 +242,35 @@ long proc_thread_sleep(long ms) {
     t->wakeup_time = current_time + ticks;
 
     TRACE_THREAD("SLEEP: Thread %d will wake up at %lu", t->tid, t->wakeup_time);
-    
+
     /* Remove from sleep queue if already there */
     remove_from_sleep_queue(p, t);
-    
-    /* Add to sleep queue */
+
+    /* FIX: splice into sleep queue -- must be atomic against the timer
+     * ISR's wake_threads_by_time(), which walks/unlinks this same list.
+     * Also restore the in_sleep_queue flag on insert -- it was only
+     * ever being cleared, never set, which desyncs the O(1) membership
+     * check from the actual list contents. */
+    sr = splhigh();
     t->next_sleeping = p->sleep_queue;
     p->sleep_queue = t;
-    TRACE_THREAD("SLEEP: Added thread %d to sleep queue (wake at %lu)", 
+    t->in_sleep_queue = 1;
+    spl(sr);
+
+    TRACE_THREAD("SLEEP: Added thread %d to sleep queue (wake at %lu)",
                 t->tid, t->wakeup_time);
-    
-        
+
+
     /* Set up a direct timeout for this thread */
     t->sleep_timeout = addtimeout(p, ms, proc_thread_sleep_wakeup_handler);
     if (t->sleep_timeout) {
         t->sleep_timeout->arg = (long)t;
     } else {
         TRACE_THREAD("SLEEP: Failed to set up sleep timeout");
+        remove_from_sleep_queue(p, t);   /* FIX: don't leave a queue entry with no timeout to wake it */
         return -1;
     }
- 
+
     CONTEXT *ctx = get_thread_context(t);
 
     if (save_context(ctx) == 0) {
@@ -261,14 +279,14 @@ long proc_thread_sleep(long ms) {
         TRACE_THREAD("SLEEP: Thread %d, ms=%d, ticks=%d, wakeup_time=%lu",t->tid , ms, ticks, t->wakeup_time);
 
         proc_thread_state_change(t, THREAD_STATE_BLOCKED);
-        
+
         t->wait_type |= WAIT_SLEEP;  /* Set wait type */
 
         remove_from_ready_queue(t);
 
         /* Schedule another thread */
         proc_thread_schedule();
-        
+
         /* We should never reach here - proc_thread_schedule() will switch to another thread */
         TRACE_THREAD("SLEEP: ERROR - Returned from proc_thread_schedule() in sleep path!");
         return -1;
@@ -278,22 +296,19 @@ long proc_thread_sleep(long ms) {
 
         if (t->t_sigpending & ~THREAD_SIGMASK(t)) {
             ret = EINTR;  /* POSIX: sleep interrupted by signal */
-            /* Thread has pending signals */
             TRACE_THREAD("SLEEP: Thread %d has pending signals 0x%lx, not sleeping (last_scheduled=%lu)  / Calling dispatch_thread_signals()", t->tid, (t->t_sigpending & ~THREAD_SIGMASK(t)), t->last_scheduled);
             dispatch_thread_signals(t);
         } else {
             TRACE_THREAD("SLEEP: Thread %d has no pending signals, proceeding to wakeup", t->tid);
         }
-        /* When we return, check if we woke up on time */
         current_time = get_system_ticks();
         if (t->wakeup_time > 0 && current_time > t->wakeup_time) {
             TRACE_THREAD("SLEEP: Thread %d woke up late by %lu ms",
                         t->tid, (current_time - t->wakeup_time) * MS_PER_TICK);
         }
         t->wait_type &= ~WAIT_SLEEP;
-        t->wakeup_time = 0; /* Clear wake-up time */
-        
-        /* Ensure we're in the RUNNING state */
+        t->wakeup_time = 0;
+
         if (t->state != THREAD_STATE_RUNNING) {
             TRACE_THREAD("SLEEP: Thread %d not in RUNNING state after wake, fixing", t->tid);
             proc_thread_state_change(t, THREAD_STATE_RUNNING);
@@ -318,17 +333,20 @@ long proc_thread_yield(void) {
     
     if(p->current_thread->tid == 0) {
         TRACE_THREAD("YIELD: Thread %d yielded for PID %d, rescheduling", p->current_thread->tid, p->pid);
+        proc_thread_schedule();
         yield();
         return 0;
     }
     
     if(p->current_thread->is_idle) {
+        proc_thread_schedule();
         TRACE_THREAD("YIELD: Idle thread %d yielded for PID %d, rescheduling", p->current_thread->tid, p->pid);
         yield();
         return 0;
     }
     /* Get next thread ONCE and cache it */
-    struct thread *next = get_highest_priority_thread_excluding(p, t);
+    // struct thread *next = get_highest_priority_thread_excluding(p, t);
+    struct thread *next = get_highest_priority_thread(p);
 
     /* Prevent excessive yielding */
     if ((get_system_ticks() - t->last_scheduled) < YIELD_INTERVAL_TICKS) {
@@ -349,12 +367,18 @@ long proc_thread_yield(void) {
         if (t->state == THREAD_STATE_RUNNING) {
             proc_thread_state_change(t, THREAD_STATE_READY);
             add_to_ready_queue(t);
+            TRACE_THREAD_VERBOSE("YIELD: Calling proc_thread_schedule()");
             proc_thread_schedule();
+            TRACE_THREAD_VERBOSE("YIELD: proc_thread_schedule() returned");
             return 0;
         }
     } else {
+        TRACE_THREAD_VERBOSE("YIELD: Thread %d policy is not SCHED_FIFO or SCHED_RR", t->tid);
         /* SCHED_OTHER: simple reschedule */
+        TRACE_THREAD_VERBOSE("YIELD: Calling proc_thread_schedule()");
         proc_thread_schedule();
+        TRACE_THREAD_VERBOSE("YIELD: proc_thread_schedule() returned");
+        return 0;
     }
     
     return 0; 

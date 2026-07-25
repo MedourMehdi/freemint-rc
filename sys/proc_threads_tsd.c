@@ -95,7 +95,7 @@ static int set_tsd_entry(struct tsd_entry **head_ptr, long key, void *value) {
  */
 static void free_tsd_entries(struct tsd_entry *head) {
     struct tsd_entry *entry = head;
-    while (entry) {
+    while (entry != NULL) {
         struct tsd_entry *next = entry->next;
         kfree(entry);
         entry = next;
@@ -111,7 +111,7 @@ static void free_tsd_entries(struct tsd_entry *head) {
  * @return 0 on success, error code on failure
  */
 int init_proc_tsd(struct proc *p) {
-    if (!p || p->magic != CTXT_MAGIC) {
+    if (!p) {
         return EINVAL;
     }
 
@@ -213,27 +213,27 @@ long thread_key_create(void (*destructor)(void*)) {
     struct thread *t;
     
     if (!CURTHREAD) {
-        TRACE_THREAD("THREAD_MUTEX_LOCK: No current thread");
+        TRACE_THREAD("THREAD_TSD_CREATE_KEY: No current thread");
         if(!handle_thread_mode_switching(p)) return EINVAL;
     }
     
     /* Initialize process TSD if not already done */
     if (!p->thread_keys) {
-        TRACE_THREAD("thread_key_create: No thread keys, initializing process TSD for process id %d", p->pid);
+        TRACE_THREAD("THREAD_TSD_CREATE_KEY: No thread keys, initializing process TSD for process id %d", p->pid);
         if (init_proc_tsd(p) != 0) {
             spl(sr);
             return ENOMEM;
         }
     }
 
-    TRACE_THREAD("thread_key_create: destructor=%p, process id %d", destructor, p->pid);
+    TRACE_THREAD("THREAD_TSD_CREATE_KEY: destructor=%p, process id %d", destructor, p->pid);
 
     /* Initialize TSD for current thread if needed */
     if (p->current_thread) {
         t = p->current_thread;
-        TRACE_THREAD("thread_key_create: current thread id %d", t->tid);
+        TRACE_THREAD("THREAD_TSD_CREATE_KEY: current thread id %d", t->tid);
         if (!t->tsd_data) {
-            TRACE_THREAD("thread_key_create: initializing TSD for current thread id %d, process id %d", t->tid, p->pid);
+            TRACE_THREAD("THREAD_TSD_CREATE_KEY: initializing TSD for current thread id %d, process id %d", t->tid, p->pid);
             init_thread_tsd(t);
         }
     }
@@ -243,7 +243,7 @@ long thread_key_create(void (*destructor)(void*)) {
         if (!p->thread_keys[i].in_use) {
             p->thread_keys[i].in_use = 1;
             p->thread_keys[i].destructor = destructor;
-            TRACE_THREAD("thread_key_create: reused key=%d", i);
+            TRACE_THREAD("THREAD_TSD_CREATE_KEY: reused key=%d", i);
             spl(sr);
             return i;
         }
@@ -254,11 +254,11 @@ long thread_key_create(void (*destructor)(void*)) {
         i = p->next_key++;
         p->thread_keys[i].in_use = 1;
         p->thread_keys[i].destructor = destructor;
-        TRACE_THREAD("thread_key_create: created key=%d", i);
+        TRACE_THREAD("THREAD_TSD_CREATE_KEY: created key=%d", i);
         spl(sr);
         return i;
     }
-    TRACE_THREAD("thread_key_create: no more keys available\n");
+    TRACE_THREAD("THREAD_TSD_CREATE_KEY: no more keys available\n");
     spl(sr);
     return EAGAIN; /* No keys available */
 }

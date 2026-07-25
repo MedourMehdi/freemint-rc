@@ -19,6 +19,10 @@
 
 #include "proc_threads_helper.h"
 
+#if THREAD_DEBUG_LEVEL >= THREAD_DEBUG_NORMAL
+#include "proc_threads_queue.h"
+#endif
+
 /* Priority scaling lookup table - converts POSIX 0-99 to internal 0-16 range */
 const unsigned char priority_scale_table[100] = {
     0,0,0,0,0,0,1,1,1,1,1,1,2,2,2,2,2,2,3,3,3,3,3,4,4,4,4,4,4,5,5,5,5,5,5,6,6,6,6,6,7,7,7,7,7,7,8,8,8,8,8,8,9,9,9,9,9,9,10,10,10,10,10,11,11,11,11,11,11,12,12,12,12,12,12,13,13,13,13,13,14,14,14,14,14,14,15,15,15,15,15,15,16,16,16,16,16,16,16,16
@@ -82,7 +86,7 @@ void reset_thread_cpu_time(struct thread *t) {
    if (!t || t->magic != CTXT_MAGIC) {
        return;
    }
-   
+   TRACE_THREAD("CPU_TIME: Resetting CPU time for thread %d from %d to 0", t->tid, t->total_cpu_time);
    t->total_cpu_time = 0;
 }
 
@@ -95,8 +99,7 @@ void reset_thread_cpu_time(struct thread *t) {
  * @return Effective priority (0-16 range, higher is better)
  */
 static inline int calculate_effective_priority(struct thread *t, unsigned long now) {
-    unsigned long elapsed;
-    int aging_bonus, cpu_penalty, effective;
+    int cpu_penalty, effective;
     
     /* RT threads (SCHED_FIFO/SCHED_RR) always use base priority */
     if (t->policy == SCHED_FIFO || t->policy == SCHED_RR) {
@@ -105,14 +108,6 @@ static inline int calculate_effective_priority(struct thread *t, unsigned long n
     
     /* SCHED_OTHER threads get dynamic priority adjustment */
     
-    /* Calculate aging bonus using fast bit shift instead of division
-     * elapsed >> AGING_SHIFT is equivalent to elapsed / 128 
-     * At 200Hz, 128 ticks = 640ms per bonus point */
-    elapsed = now - t->last_scheduled;
-    aging_bonus = (int)(elapsed >> AGING_SHIFT);
-    if (aging_bonus > MAX_AGING_BONUS) {
-        aging_bonus = MAX_AGING_BONUS;
-    }
     
     /* Calculate CPU penalty using fast bit shift
      * total_cpu_time >> CPU_PENALTY_SHIFT is equivalent to total_cpu_time / 256
@@ -122,8 +117,8 @@ static inline int calculate_effective_priority(struct thread *t, unsigned long n
         cpu_penalty = MAX_CPU_PENALTY;
     }
     
-    /* Calculate effective priority: base + aging - cpu_usage */
-    effective = t->priority + aging_bonus - cpu_penalty;
+    /* Calculate effective priority: base  - cpu_usage */
+    effective = t->priority - cpu_penalty;
     
     /* Clamp to valid range [0, 16] */
     if (effective < MIN_THREAD_PRIORITY) {
@@ -176,7 +171,7 @@ void reset_thread_priority(struct thread *t) {
         return;
     }
     
-    TRACE_THREAD("Resetting priority of thread %d", t->tid);
+    TRACE_THREAD("RESET_PRIORITY: Resetting priority of thread %d from %d to %d", t->tid, t->priority, t->original_priority);
     
     t->priority = t->original_priority;
     t->priority_boost = 0;
@@ -217,7 +212,12 @@ struct thread *get_highest_priority_thread(struct proc *p)
     now = get_system_ticks();
     t = p->ready_queue;
 
+    #if THREAD_DEBUG_LEVEL >= THREAD_DEBUG_NORMAL
+    dump_ready_queue_threads(p, "PRE-SELECT");
+    #endif
+
     while (t) {
+        
         if (t->magic != CTXT_MAGIC || (t->state & THREAD_STATE_EXITED)) {
             t = t->next_ready;
             continue;
@@ -267,6 +267,7 @@ struct thread *get_highest_priority_thread(struct proc *p)
                          alt_rt->tid, current->tid);
             return alt_rt;
         }
+        TRACE_THREAD("Selected RT thread %d with priority %d", best_rt->tid, best_rt_pri);
         return best_rt;
     }
 
@@ -282,6 +283,7 @@ struct thread *get_highest_priority_thread(struct proc *p)
 
     /* Finally idle */
     if (best_idle) {
+        TRACE_THREAD("Selected idle thread %d", best_idle->tid);
         return best_idle;
     }
 
@@ -297,6 +299,7 @@ struct thread *get_highest_priority_thread_excluding(struct proc *p, struct thre
     unsigned long now;
 
     if (!p || !p->ready_queue) {
+        TRACE_THREAD("get_highest_priority_thread_excluding: Ready queue empty or Invalid process pointer");
         return NULL;
     }
 
@@ -330,6 +333,7 @@ struct thread *get_highest_priority_thread_excluding(struct proc *p, struct thre
         /* ---- SCHED_OTHER ---- */
         else {
             effective_pri = calculate_effective_priority(t, now);
+            TRACE_THREAD("get_highest_priority_thread_excluding: Thread %d effective priority=%d, best_other_pri=%d", t->tid, effective_pri, best_other_pri);
             if (effective_pri > best_other_pri) {
                 best_other = t;
                 best_other_pri = effective_pri;
@@ -339,6 +343,7 @@ struct thread *get_highest_priority_thread_excluding(struct proc *p, struct thre
         t = t->next_ready;
     }
 
+    TRACE_THREAD("get_highest_priority_thread_excluding: best_rt=%p, best_other=%p, best_idle=%p", best_rt, best_other, best_idle);
     /* POSIX order */
     if (best_rt)     return best_rt;
     if (best_other) return best_other;
@@ -356,7 +361,15 @@ struct thread *get_highest_priority_thread_excluding(struct proc *p, struct thre
  * @return The current system tick count.
  */
 inline unsigned long get_system_ticks(void) {
-    return *((volatile unsigned long *)_hz_200);
+    unsigned long ticks;
+    register unsigned short sr;
+    /* m68k 16-bit bus: 32-bit read is non-atomic. Timer increment
+     * between halves produces garbage (e.g. 0x0000FFFF -> 0x00010000
+     * could read as 0x00000000 or 0x0001FFFF). */
+    sr = splhigh();
+    ticks = *((volatile unsigned long *)_hz_200);
+    spl(sr);
+    return ticks;
 }
 
 /**
@@ -419,7 +432,6 @@ void proc_thread_state_change(struct thread *t, int new_state) {
     // register unsigned short sr = splhigh();
     TRACE_THREAD("STATE CHANGED - thread pointer = %p, tid = %d, new_state=%d", t, t->tid, new_state);
     t->state = new_state;
-    // spl(sr);
 }
 
 /*
@@ -459,7 +471,6 @@ long timeout_remaining(TIMEOUT *t)
  */
 long sys_p_thread_getid(void) {
     struct thread *t = CURTHREAD;
-    
     if (!t){
         TRACE_THREAD("sys_p_thread_getid: Warning - get tid called and no current thread");
         return -1;

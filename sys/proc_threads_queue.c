@@ -24,6 +24,94 @@
 #include "proc_threads_sync.h"
 #include "proc_threads_sem.h"
 
+#if THREAD_DEBUG_LEVEL >= THREAD_DEBUG_NORMAL
+/**
+ * dump_ready_queue_threads() - Comprehensive ready queue state dump
+ * 
+ * Prints every thread in the ready queue with:
+ *   - tid, magic number (hex)
+ *   - state value (0x%04x) + human-readable abbreviation
+ *   - base priority + effective priority (for SCHED_OTHER)
+ *   - scheduling policy (FIFO/RR/OTHER)
+ *   - boost flag, queue membership flags
+ *   - wait_type (hex), CPU time, last scheduled time
+ *   - next_ready pointer (for queue integrity verification)
+ * 
+ * Also detects corruption: bad magic, self-loops, stack magic violations.
+ */
+void dump_ready_queue_threads(struct proc *p, const char *label)
+{
+    struct thread *t;
+    int count = 0;
+    #ifdef DEBUG_THREAD
+    unsigned long now = get_system_ticks();
+    struct thread *current = CURTHREAD;
+    
+    TRACE_THREAD("========== READY QUEUE DUMP: %s ==========", label);
+    TRACE_THREAD("  PID=%d curthr=%d pri=%2d time=%lu", 
+                 p ? p->pid : -1, 
+                 current ? current->tid : -1, 
+                 current ? current->priority : -1,
+                 now);
+    #endif
+    if (!p || !p->ready_queue) {
+        TRACE_THREAD("  [EMPTY]");
+        TRACE_THREAD("========== END DUMP ==========");
+        return;
+    }
+    
+    t = p->ready_queue;
+    while (t && count < 50) {
+        #ifdef DEBUG_THREAD
+        char *pol = "?????";
+        char *st = "?????";
+        
+        if (t->policy == SCHED_FIFO)      pol = "FIFO";
+        else if (t->policy == SCHED_RR)     pol = "RR  ";
+        else if (t->policy == SCHED_OTHER)  pol = "OTHR";
+        
+        switch (t->state) {
+            case THREAD_STATE_RUNNING:  st = "RUN"; break;
+            case THREAD_STATE_READY:    st = "RDY"; break;
+            case THREAD_STATE_BLOCKED:  st = "BLK"; break;
+            case THREAD_STATE_EXITED:   st = "EXT"; break;
+            default: 
+                if (t->state & THREAD_STATE_EXITED)  st = "EXT+";
+                else if (t->state & THREAD_STATE_BLOCKED) st = "BLK+";
+                else st = "???";
+                break;
+        }
+        
+        TRACE_THREAD("  [%02d] tid=%3d magic=%08lx state=0x%04x(%s) pri=%2d pol=%s "
+                     "bst=%d rq=%d sq=%d wait=0x%04x cpu=%lu lst=%lu nxt=%p",
+                     count, t->tid, t->magic, (unsigned short)t->state, st,
+                     t->priority, pol, t->priority_boost,
+                     t->in_ready_queue, t->in_sleep_queue,
+                     (unsigned short)t->wait_type, t->total_cpu_time,
+                     t->last_scheduled, (void*)t->next_ready);
+        #endif
+        /* Corruption checks */
+        if (t->magic != CTXT_MAGIC)
+            TRACE_THREAD("  *** BAD MAGIC on tid=%d ***", t->tid);
+        if (t->next_ready && t->next_ready == t) {
+            TRACE_THREAD("  *** SELF-LOOP on tid=%d ***", t->tid);
+            break;
+        }
+        if (t->stack_magic != STACK_MAGIC && t->tid != 0 && !t->is_idle)
+            TRACE_THREAD("  *** BAD STACK on tid=%d ***", t->tid);
+        
+        t = t->next_ready;
+        count++;
+    }
+    
+    if (count >= 50)
+        TRACE_THREAD("  *** TRUNCATED ***");
+    
+    TRACE_THREAD("  Total: %d threads", count);
+    TRACE_THREAD("========== END DUMP ==========");
+}
+#endif
+
 void add_to_ready_queue(struct thread *t) {
     struct proc *p;
     register unsigned short sr;

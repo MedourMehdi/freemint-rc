@@ -130,7 +130,9 @@ static int set_thread_policy(struct thread *t, enum sched_policy policy, int pri
                 proc_thread_state_change(t, THREAD_STATE_READY);
                 add_to_ready_queue(t);
                 spl(sr);  /* Release lock before scheduling */
+                TRACE_THREAD("POLICY: Calling proc_thread_schedule()");
                 proc_thread_schedule();
+                TRACE_THREAD("POLICY: proc_thread_schedule() returned");
                 return 0;
             }
         }
@@ -185,7 +187,7 @@ long proc_thread_set_schedparam(long tid, long policy, long priority)
     }
     
     /* Scale the priority from 0-99 to 0-16 range */
-    int scaled_priority = scale_thread_priority((int)priority);
+    int scaled_priority = (int)priority;
     
     return set_thread_policy(t, (enum sched_policy)policy, scaled_priority);
 }
@@ -376,6 +378,8 @@ void update_thread_timeslice(struct thread *t)
             /* Reset timeslice when expired */
             t->remaining_timeslice = t->timeslice;
             reset_thread_priority(t);
+            TRACE_THREAD("TIMESLICE: tid=%d expired, reset to %d, state=%d in_rq=%d",
+                         t->tid, t->timeslice, t->state, t->in_ready_queue);            
         } else {
             /* Decrement remaining timeslice */
             t->remaining_timeslice -= elapsed;
@@ -396,7 +400,7 @@ long proc_thread_set_policy(enum sched_policy policy, short priority, short time
     register unsigned short sr = splhigh();
     
     /* Scale the priority from 0-99 to 0-16 range */
-    int scaled_priority = scale_thread_priority(priority);
+    int scaled_priority = (int)priority;
     
     /* Set the policy and priority */
     int result = set_thread_policy(current, policy, scaled_priority);

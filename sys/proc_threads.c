@@ -236,14 +236,14 @@ static long create_thread(struct proc *p, void *(*func)(void*), void *arg,
     
     /* Priority calculation */
     if (thread_priority > 0) {
-        t->priority = scale_thread_priority(thread_priority);
-        t->original_priority = scale_thread_priority(thread_priority);
+        t->priority = thread_priority;
+        t->original_priority = thread_priority;
         TRACE_THREAD("Using %s priority %d for thread %d", 
                      use_explicit_sched ? "explicit" : "inherited",
                      thread_priority, t->tid);
     } else {
         calc_priority = (p->pri < 0) ? -p->pri : p->pri;
-        t->priority = MAX(scale_thread_priority(calc_priority), 1);
+        t->priority = MAX(calc_priority, 1);
         t->original_priority = t->priority;
     }
     
@@ -312,9 +312,6 @@ static long create_thread(struct proc *p, void *(*func)(void*), void *arg,
 static void init_thread_context(struct thread *t, void *(*func)(void*), 
                                void *arg) {
     unsigned long usp, ssp;
-    unsigned long usp_size = ((unsigned long)t->stack_top - ((t->stack_size >> 1) - 256)); // Extra space for safety
-    unsigned long ssp_size = ((unsigned long)t->stack_top - (t->stack_size - 256)); // Extra space for safety
-    TRACE_THREAD("INIT CONTEXT: Initializing context for thread %d, stack_top - usp_size = %ld, ssp_size = %ld, ", t->tid, ((t->stack_size >> 1) - 256), (t->stack_size - 256));
     
     /* Clear contexts completely */
     mint_bzero(&t->ctxt[CURRENT], sizeof(t->ctxt[CURRENT]));
@@ -328,11 +325,16 @@ static void init_thread_context(struct thread *t, void *(*func)(void*),
     memcpy(&t->ctxt[CURRENT], &t->proc->ctxt[CURRENT], sizeof(CONTEXT));
     memcpy(&t->ctxt[SYSCALL], &t->proc->ctxt[SYSCALL], sizeof(CONTEXT));
 
-    /* Set up stack pointers (aligned to 4-byte boundary for m68k) */
-    // usp = ((unsigned long)t->stack_top - 2048) & ~0x1UL;
-    // ssp = ((unsigned long)t->stack_top - 4096) & ~0x1UL;
-    usp = (usp_size) & ~0x1UL;
-    ssp = (ssp_size) & ~0x1UL;
+    /* 
+    * Split the stack: 
+    * Top half = User Stack (USP)
+    * Bottom half = Supervisor Stack (SSP) 
+    */
+    unsigned long mid_point = (unsigned long)t->stack + (t->stack_size / 2);
+
+    /* Align to 4-byte boundary */
+    usp = (unsigned long)t->stack_top & ~0x1UL;
+    ssp = mid_point & ~0x1UL;
     
     /* Initialize CURRENT context (what thread will run with) */
     t->ctxt[CURRENT].ssp = ssp;
@@ -399,9 +401,8 @@ static void init_main_thread_context(struct proc *p) {
     
     /* Priority setup */
     TRACE_THREAD("INIT CONTEXT: Process %d base priority=%d", p->pid, p->pri);
-    t0->priority = MAX(scale_thread_priority(-p->pri), 1);
+    t0->priority = 1;
     TRACE_THREAD("INIT CONTEXT: Thread0 priority set to %d", t0->priority);
-    p->pri -= 10;  /* Decrease process priority to account for thread0 */
     t0->original_priority = t0->priority;
     t0->policy = DEFAULT_SCHED_POLICY;
     
@@ -514,7 +515,7 @@ CONTEXT* get_thread_context(struct thread *t) {
 /* Ensures proper cleanup order to avoid race conditions                     */
 /******************************************************************************/
 void proc_thread_cleanup_process(struct proc *pcurproc) {
-    struct thread *t, *next;
+    struct thread *t;
     TIMEOUT *timelist, *next_timelist;
     
     if (!pcurproc->threads) return;
@@ -562,14 +563,14 @@ void proc_thread_cleanup_process(struct proc *pcurproc) {
     /* Step 6: Free individual thread resources */
     t = pcurproc->threads;
     while (t) {
-        next = t->next;
+        struct thread *t_next = t->next;  /* Save next BEFORE potential kfree */
         
         if (t->magic == CTXT_MAGIC && t->tid != 0) {
             TRACE(("terminate: freeing thread %d resources", t->tid));
             cleanup_thread_resources(pcurproc, t, t->tid);
         }
         
-        t = next;
+        t = t_next;
     }
 
     /* Step 7: Clean up process-wide thread state */

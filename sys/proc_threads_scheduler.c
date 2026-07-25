@@ -150,13 +150,18 @@ static inline void sync_sys_to_proc(struct thread *t) {
 /* Checks if current thread should be preempted and schedules another if so. */
 /******************************************************************************/
 void thread_preempt_handler(PROC *p, long arg) {
-    // register unsigned short sr;
+
     struct thread *thread_arg = (struct thread *)arg;
-    struct thread *curr_thread;
-    // sr = splhigh();
+    register unsigned short sr = splhigh();
+
+    TRACE_THREAD("PREEMPT: Preemption handler invoked for process %d, current thread=%d, arg thread=%d", 
+                 p->pid, 
+                 p->current_thread ? p->current_thread->tid : -1, 
+                 thread_arg ? thread_arg->tid : -1);
+                 
     /* If not current process, reschedule the timeout */
     if (p != curproc) {
-        // spl(sr);
+        spl(sr);
         TRACE_THREAD("PREEMPT: looking for process id %d but current is %d, rescheduling timeout", p->pid, curproc->pid);
         TRACE_THREAD("PREEMPT: Rescheduling preemption timer for process %d, prio is %d", p->pid, p->pri);
         reschedule_preemption_timer(p, (long)p->current_thread);
@@ -168,9 +173,9 @@ void thread_preempt_handler(PROC *p, long arg) {
      * P_FLAG_THREADED block preempt for forked process from thread env.
      */
     if (!p->current_thread 
-        // || !(p->p_flag & P_FLAG_THREADED)
+        || !(p->p_flag & P_FLAG_THREADED)
     ) {
-        // spl(sr);
+        spl(sr);
         TRACE_THREAD("PREEMPT: No current thread (process exiting), aborting");
         return;
     }
@@ -200,34 +205,38 @@ void thread_preempt_handler(PROC *p, long arg) {
     }
     
     /* Protection against reentrance */
-    if (p->p_thread_timer.in_handler) {
+    if (p->p_thread_timer.in_handler > 0) {
         if (!p->p_thread_timer.enabled) {
             TRACE_THREAD("PREEMPT: Timer disabled, not rescheduling");
-            // spl(sr);
+            spl(sr);
             return;
         }
-        // spl(sr);
-        TRACE_THREAD("PREEMPT: Already in handler, rescheduling");
-        reschedule_preemption_timer(p, (long)p->current_thread);
+        TRACE_THREAD("PREEMPT: Reentrance detected, rescheduling");
+        /* Nested: bump counter, outer handler will reschedule */
+        p->p_thread_timer.in_handler++;
+        spl(sr);
         return;
     }
     
     /* Mark handler as active */
-    p->p_thread_timer.in_handler = 1;
+    p->p_thread_timer.in_handler = 1;  /* Outer: counter = 1 */
     p->p_thread_timer.timeout = NULL;
-    curr_thread = p->current_thread;
-    // spl(sr);
+    spl(sr);
 
-    TRACE_THREAD("PREEMPT: Current thread=%d, arg thread=%d", 
-                curr_thread ? curr_thread->tid : -1, 
+    TRACE_THREAD("PREEMPT: Current thread=%d, arg thread=%d",
+                p->current_thread ? p->current_thread->tid : -1,
                 thread_arg ? thread_arg->tid : -1);
 
     /* Run scheduler (may switch threads) */
     proc_thread_schedule();
     
-    /* Reschedule timer for next preemption */
-    TRACE_THREAD("PREEMPT: Rescheduling current thread %d", curr_thread->tid);
-    reschedule_preemption_timer(p, (long)curr_thread);
+    /* Use CURRENT thread, not cached -- may have exited during switch */
+    TRACE_THREAD("PREEMPT: Rescheduling current thread %d",
+                p->current_thread ? p->current_thread->tid : -1);
+    sr = splhigh();
+    p->p_thread_timer.in_handler--;  /* Only outer decrements */
+    spl(sr);
+    reschedule_preemption_timer(p, (long)p->current_thread);
 }
 
 /******************************************************************************/
@@ -738,7 +747,7 @@ void proc_thread_exit(void *retval, void *arg) {
     }
 
     TRACE_THREAD("EXIT: Synced syscall context for exiting thread %d", tid);
-    // cleanup_thread_resources(p, current, tid);
+    cleanup_thread_resources(p, current, tid);
     // TRACE_THREAD("EXIT: Cleaned up resources for exiting thread %d", tid);
     TRACE_THREAD("Thread %d exited", tid);
     
@@ -1038,9 +1047,12 @@ static void execute_thread_switch(struct thread_switch_context *ctx) {
     int sig;
     CONTEXT *from_ctx;
 
+    register unsigned short sr = splhigh();
+
     /* Check if another switch is in progress */
     if (thread_switch_in_progress) {
         TRACE_THREAD("SWITCH: Another switch in progress, aborting");
+        spl(sr);
         return;
     }
     
@@ -1088,6 +1100,7 @@ static void execute_thread_switch(struct thread_switch_context *ctx) {
         }
         
         if (has_pending) {
+            spl(sr);
             TRACE_THREAD("SWITCH: Dispatching signals for thread %d (has handler)", 
                         ctx->to->tid);
             dispatch_thread_signals(ctx->to);
@@ -1095,7 +1108,7 @@ static void execute_thread_switch(struct thread_switch_context *ctx) {
                         "pending=%d, in_progress=%d", 
                         ctx->to->tid, ctx->to->t_sigpending, 
                         ctx->to->t_sig_in_progress);
-            
+            sr = splhigh();
             /* Refresh context after signal dispatch */
             if (ctx->to->t_sig_in_progress) {
                 TRACE_THREAD("SWITCH: Signal handler active, switching to signal context");
@@ -1133,11 +1146,14 @@ static void execute_thread_switch(struct thread_switch_context *ctx) {
 
         sync_sys_to_proc(ctx->to);
 
+        spl(sr);
+
         if ((ctx->to_ctx->sr & 0x2000) == 0) leave_kernel();
         change_context(ctx->to_ctx);
         
         TRACE_THREAD("SWITCH ERROR: Should not reach here!");
     } else {
+
         /* Thread is running - save context before switching */
         if (ctx->from->wait_type == WAIT_NONE) {
             proc_thread_state_change(ctx->from, THREAD_STATE_READY);
@@ -1149,35 +1165,42 @@ static void execute_thread_switch(struct thread_switch_context *ctx) {
                     ctx->from->tid, from_ctx->ssp, from_ctx->usp, from_ctx->pc);
 
         if (save_context(from_ctx) == 0) {
-            /* First time through save_context */
+            /* Context is NOW saved — safe to make from thread visible to scheduler */
             from_ctx->regs[0] = 1;
 
             sync_sys_from_proc(ctx->from);
 
+            /* FIX: enqueue from-thread only after save_context() has captured its
+            * state. Before this point, from_ctx->pc/sp are stale. */
+            if (ctx->from->wait_type == WAIT_NONE &&
+                !(ctx->from->state & THREAD_STATE_EXITED)) {
+                add_to_ready_queue(ctx->from);
+            }
+
             TRACE_THREAD("SWITCH: FIRST TIME - Saved context for thread %d, "
-                        "ssp=%lx, usp=%lx, pc=%lx, sr=%x, to=%d", 
-                        ctx->from->tid, from_ctx->ssp, from_ctx->usp, 
+                        "ssp=%lx, usp=%lx, pc=%lx, sr=%x, to=%d",
+                        ctx->from->tid, from_ctx->ssp, from_ctx->usp,
                         from_ctx->pc, from_ctx->sr, ctx->to->tid);
 
             proc_thread_state_change(ctx->to, THREAD_STATE_RUNNING);
             reset_thread_priority(ctx->to);
             reset_thread_switch_state();
 
-            TRACE_THREAD("SWITCH: Switched to context for thread %d, ssp=%lx, "
-                        "usp=%lx, pc=%lx, sr=%x", 
-                        ctx->to->tid, ctx->to_ctx->ssp, ctx->to_ctx->usp, 
-                        ctx->to_ctx->pc, ctx->to_ctx->sr);
-            
             ctx->from->proc->current_thread = ctx->to;
             ctx->to->last_scheduled = get_system_ticks();
 
             sync_sys_to_proc(ctx->to);
-            
+
+            spl(sr);
+
             if ((ctx->to_ctx->sr & 0x2000) == 0) leave_kernel();
             change_context(ctx->to_ctx);
-            
+
             TRACE_THREAD("SWITCH ERROR: Should not reach here!");
         }
+
+        /* RETURN PATH: thread resumed after context switch */
+        reset_thread_switch_state();
 
         TRACE_THREAD("SWITCH: Changed context after save for thread %d, "
                     "IN_DOS=%x, IN_KERNEL=%x",
@@ -1265,61 +1288,61 @@ static int prepare_scheduling_decision(struct proc *p,
         }
     }
     
-    // /* Check if we should schedule next thread */
-    // decision->should_switch = should_schedule_thread(decision->current_thread, 
-    //                                                  decision->next_thread);
-    decision->should_switch = 1; // Always switch for simplicity
+    /* Check if we should schedule next thread */
+    // decision->should_switch = should_schedule_thread(decision->current_thread,
+    //                                                   decision->next_thread);
+    decision->should_switch = 1;
+
     return decision->should_switch;
 }
 
 /******************************************************************************/
 /* execute_scheduling_decision - Execute prepared scheduling decision        */
 /******************************************************************************/
-static void execute_scheduling_decision(struct proc *p, 
+static void execute_scheduling_decision(struct proc *p,
                                        struct scheduling_decision *decision) {
     struct mutex *m;
-    
+
     if (!decision->should_switch || !decision->next_thread) {
         TRACE_THREAD("SCHED: No switch needed");
         return;
     }
-    
-    TRACE_THREAD("SCHED: Executing switch from %d to %d", 
-                decision->current_thread ? decision->current_thread->tid : -1, 
+
+    TRACE_THREAD("SCHED: Executing switch from %d to %d",
+                decision->current_thread ? decision->current_thread->tid : -1,
                 decision->next_thread->tid);
-    /* DEBUG: Dump queue state BEFORE switch */
+
     trace_ready_queue_dump(p, "PRE-SWITCH");
+
     /* Remove next from ready queue if it's there */
     if (is_in_ready_queue(decision->next_thread)) {
         remove_from_ready_queue(decision->next_thread);
     }
-    
+
     /* Update thread states and prepare for switch */
     if (decision->current_thread) {
-        /* Update timeslice accounting for current thread */
         update_thread_timeslice(decision->current_thread);
-        
-        /* Handle current thread based on its state */
+
         if (decision->current_thread->state == THREAD_STATE_RUNNING) {
             update_thread_cpu_time(decision->current_thread);
+
             if (decision->current_thread->wait_type != WAIT_NONE) {
-                proc_thread_state_change(decision->current_thread, 
-                                          THREAD_STATE_BLOCKED);
-                
+                proc_thread_state_change(decision->current_thread,
+                                         THREAD_STATE_BLOCKED);
+
                 /* Priority inheritance for mutexes */
-                if ((decision->current_thread->wait_type & WAIT_MUTEX) && 
+                if ((decision->current_thread->wait_type & WAIT_MUTEX) &&
                     decision->current_thread->mutex_wait_obj) {
 
                     m = (struct mutex*)decision->current_thread->mutex_wait_obj;
 
-                    if (m->owner && 
+                    if (m->owner &&
                         m->owner->priority < decision->current_thread->priority) {
 
-                        boost_thread_priority(m->owner, 
-                                            decision->current_thread->priority - 
+                        boost_thread_priority(m->owner,
+                                            decision->current_thread->priority -
                                             m->owner->priority);
-                        
-                        /* Reinsert owner in ready queue if needed */
+
                         if (m->owner->state == THREAD_STATE_READY) {
                             remove_from_ready_queue(m->owner);
                             add_to_ready_queue(m->owner);
@@ -1327,27 +1350,27 @@ static void execute_scheduling_decision(struct proc *p,
                     }
                 }
             } else {
-                /* Thread is runnable but being preempted */
-                proc_thread_state_change(decision->current_thread, 
-                                          THREAD_STATE_READY);
-                add_to_ready_queue(decision->current_thread);
+                /* FIX: do NOT add current_thread back to the ready queue here.
+                 * The thread is still RUNNING — its context hasn't been saved yet.
+                 * Adding it now lets the scheduler pick it up before save_context()
+                 * captures the new PC/SP, causing change_context() to resume from
+                 * stale state on the next switch.
+                 *
+                 * The re-enqueue must happen inside execute_thread_switch() on
+                 * the save_context() wakeup path — i.e. after the context is
+                 * actually saved — which is what thread_switch() already does
+                 * via the THREAD_STATE_READY transition inside save_context==0
+                 * branch. So just mark it READY here and let thread_switch handle
+                 * the queue insertion. */
+                proc_thread_state_change(decision->current_thread,
+                                         THREAD_STATE_READY);
+                /* do NOT call add_to_ready_queue() here */
             }
         }
     }
-    
-    /* Update next thread state */
+
     proc_thread_state_change(decision->next_thread, THREAD_STATE_RUNNING);
 
-    /* Reschedule preemption timer if needed */
-    if (p->p_thread_timer.in_handler) {
-        if (!p->p_thread_timer.enabled) {
-            TRACE_THREAD("SCHEDULER -> PREEMPT: Timer disabled, not rescheduling");
-        }
-        TRACE_THREAD("SCHEDULER -> PREEMPT: Already in handler, rescheduling");
-        reschedule_preemption_timer(p, (long)p->current_thread);
-    }
-
-    /* Perform thread switch */
     thread_switch(decision->current_thread, decision->next_thread);
 }
 
@@ -1372,7 +1395,6 @@ void reschedule_preemption_timer(PROC *p, long arg) {
     
     p->p_thread_timer.timeout = addtimeout(p, p->thread_preempt_interval, 
                                           thread_preempt_handler);
-    p->p_thread_timer.in_handler = 0;
     
     if (p->p_thread_timer.timeout) {
         p->p_thread_timer.timeout->arg = (long)t;

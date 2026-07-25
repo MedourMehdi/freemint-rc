@@ -77,6 +77,7 @@ long _cdecl sys_p_thread_ctrl(long func, long arg1, long arg2) {
             
             if (new_state != PTHREAD_CANCEL_ENABLE && 
                 new_state != PTHREAD_CANCEL_DISABLE) {
+                TRACE_THREAD("SETCANCELSTATE: Invalid cancel state %d", new_state);
                 return EINVAL;
             }
             
@@ -84,10 +85,13 @@ long _cdecl sys_p_thread_ctrl(long func, long arg1, long arg2) {
             int old_state = t->cancel_state;
             t->cancel_state = new_state;
             
+            TRACE_THREAD("SETCANCELSTATE: Thread %d changed cancel state from %d to %d", t->tid, old_state, new_state);
+
             // If oldstate pointer provided, store previous state
             if (arg2) {
                 if (copyout(&old_state, (void*)arg2, sizeof(int))) {
                     spl(sr);
+                    TRACE_THREAD("SETCANCELSTATE: copyout failed for old_state");
                     return EFAULT;
                 }
             }
@@ -103,6 +107,7 @@ long _cdecl sys_p_thread_ctrl(long func, long arg1, long arg2) {
             int new_type = (int)arg1;
             if (new_type != PTHREAD_CANCEL_DEFERRED && 
                 new_type != PTHREAD_CANCEL_ASYNCHRONOUS) {
+                TRACE_THREAD("SETCANCELTYPE: Invalid cancel type %d", new_type);
                 return EINVAL;
             }
             
@@ -110,13 +115,16 @@ long _cdecl sys_p_thread_ctrl(long func, long arg1, long arg2) {
             int old_type = t->cancel_type;
             t->cancel_type = new_type;
             
+            TRACE_THREAD("SETCANCELTYPE: Thread %d changed cancel type from %d to %d", t->tid, old_type, new_type);
+
             if (arg2) {
                 if (copyout(&old_type, (void*)arg2, sizeof(int))) {
                     spl(sr);
+                    TRACE_THREAD("SETCANCELTYPE: copyout failed for old_type");
                     return EFAULT;
                 }
             }
-            
+            TRACE_THREAD("SETCANCELTYPE: Thread %d cancel type set to %d", t->tid, new_type);
             spl(sr);
             return 0;
         }
@@ -130,6 +138,8 @@ long _cdecl sys_p_thread_ctrl(long func, long arg1, long arg2) {
                                 t->cancel_pending);
             spl(sr);
             
+            TRACE_THREAD("TESTCANCEL: Thread %d should_cancel=%d", t->tid, should_cancel);
+
             if (should_cancel) {
                 TRACE_THREAD("TESTCANCEL: Thread %d cancelling itself", t->tid);
                 // Exit current thread (t = NULL means current thread exits itself)
@@ -143,6 +153,9 @@ long _cdecl sys_p_thread_ctrl(long func, long arg1, long arg2) {
             if (!target) return ESRCH;
             
             register unsigned short sr = splhigh();
+
+            TRACE_THREAD("CANCELLING THREAD %d", target->tid);
+
             target->cancel_pending = 1;
             
             // For ASYNCHRONOUS mode, send a signal to interrupt the target thread
@@ -164,16 +177,20 @@ long _cdecl sys_p_thread_ctrl(long func, long arg1, long arg2) {
         }
 
         case THREAD_CTRL_STATUS:
+            TRACE_THREAD("THREAD_CTRL_STATUS");
             // Get thread status
             return proc_thread_status(arg1);
 
         case THREAD_CTRL_GETID:
+            TRACE_THREAD_VERBOSE("THREAD_CTRL_GETID");
             return sys_p_thread_getid();
 
         case THREAD_CTRL_GET_ERRNO_PTR:
+            TRACE_THREAD_VERBOSE("THREAD_CTRL_GET_ERRNO_PTR");
             return (long)CURTHREAD->errno_ptr;  // May be NULL
 
         case THREAD_CTRL_SET_ERRNO_PTR:
+            TRACE_THREAD("THREAD_CTRL_SET_ERRNO_PTR: Setting errno_ptr to %p", (void *)arg1);
             CURTHREAD->errno_ptr = (int *)arg1;
             return 0;
 
@@ -181,13 +198,24 @@ long _cdecl sys_p_thread_ctrl(long func, long arg1, long arg2) {
             short tid = (short)arg1;
             char *user_name = (char *)arg2;
             struct thread *target = proc_thread_find(curproc, tid);
-            if (!target) return ESRCH;
-
             char kname[16];
-            if (copyin(user_name, kname, 16)) return EFAULT;
+
+            TRACE_THREAD("THREAD_CTRL_SETNAME: Setting name for thread %d to '%s'", tid, user_name);
+
+            if (!target) {
+                TRACE_THREAD("THREAD_CTRL_SETNAME: No such thread %d", tid);
+                return ESRCH;
+            }
+
+            
+            if (copyin(user_name, kname, 16)) {
+                TRACE_THREAD("THREAD_CTRL_SETNAME: Copyin failed");
+                return EFAULT;
+            }
             kname[15] = '\0'; // Ensure null termination
             
             strcpy(target->name, kname);
+            TRACE_THREAD("THREAD_CTRL_SETNAME: Thread %d name set to '%s'", tid, target->name);
             return 0;
         }
         
@@ -195,6 +223,7 @@ long _cdecl sys_p_thread_ctrl(long func, long arg1, long arg2) {
             short tid = (short)arg1;
             char *user_buf = (char *)arg2;
             struct thread *target = proc_thread_find(curproc, tid);
+            TRACE_THREAD("THREAD_CTRL_GETNAME: Getting name for thread %d", tid);
             if (!target) return ESRCH;
             
             if (copyout(target->name, user_buf, 16)) return EFAULT;
@@ -203,12 +232,14 @@ long _cdecl sys_p_thread_ctrl(long func, long arg1, long arg2) {
 
         case THREAD_CTRL_IS_INITIAL: {
             struct thread *t = CURTHREAD;
+            TRACE_THREAD("THREAD_CTRL_IS_INITIAL: Thread %d is initial", t ? t->tid : -1);
             if (!t) return 0; // Not a thread? Then not initial
             return (t->tid == 0) ? 1 : 0;
         }
 
         case THREAD_CTRL_IS_MULTITHREADED: {
             struct proc *p = curproc;
+            TRACE_THREAD("THREAD_CTRL_IS_MULTITHREADED: Process %d has %d threads", p ? p->pid : -1, p ? p->num_threads : -1);
             if (!p || !p->threads) return 0;
             return (p->num_threads > 1) ? 1 : 0;
         }
@@ -241,6 +272,8 @@ long _cdecl sys_p_thread_ctrl(long func, long arg1, long arg2) {
 
             register unsigned short sr = splhigh();
 
+
+            TRACE_THREAD("SWITCH_TO_MAIN: Switching from thread %d to main thread %d", current->tid, main_thread->tid);
             // Prepare current thread for rescheduling
             proc_thread_state_change(current, THREAD_STATE_READY);
             add_to_ready_queue(current);
@@ -270,6 +303,9 @@ long _cdecl sys_p_thread_ctrl(long func, long arg1, long arg2) {
 
             // Find target thread
             struct thread *t = NULL;
+
+            TRACE_THREAD("SWITCH_TO_THREAD: Attempting to switch from thread %d to thread %d", current ? current->tid : -1, target_tid);
+
             for (t = p->threads; t != NULL; t = t->next) {
                 if (t->tid == target_tid && t->magic == CTXT_MAGIC && 
                     !(t->state & THREAD_STATE_EXITED)) {
@@ -309,8 +345,10 @@ long _cdecl sys_p_thread_ctrl(long func, long arg1, long arg2) {
             return 0;
         }
         case THREAD_CTRL_SIGRETURN:
+            TRACE_THREAD("THREAD_CTRL_SIGRETURN");
             return proc_thread_sigreturn();
         case THREAD_CTRL_SETUP_THREADING:
+            TRACE_THREAD("THREAD_CTRL_SETUP_THREADING");
             if(handle_thread_mode_switching(curproc)) {
                 return 0;
             }
@@ -344,8 +382,8 @@ long _cdecl sys_p_thread_signal(long func, long arg1, long arg2) {
                 return ESRCH;
             }
 
+            TRACE_THREAD("PTSIG_KILL: Process %d has %d threads", p->pid, p->total_threads);
             /* Find thread by ID */
-            register unsigned short sr = splhigh();
             struct thread *t;
             for (t = p->threads; t != NULL; t = t->next) {
                 if (t->tid == arg1) {
@@ -353,7 +391,6 @@ long _cdecl sys_p_thread_signal(long func, long arg1, long arg2) {
                     break;
                 }
             }
-            spl(sr);
             
             if (!target) {
                 TRACE_THREAD("PTSIG_KILL: Thread with ID %ld not found", arg1);
@@ -379,6 +416,8 @@ long _cdecl sys_p_thread_signal(long func, long arg1, long arg2) {
             }
             return 0;
         case PTSIG_SETMASK:
+            TRACE_THREAD("K: PTSIG_SETMASK arg=0x%08lx for tid=%d (before t_sigmask=0x%08lx)",
+                    (ulong)arg1, CURTHREAD ? CURTHREAD->tid : -1, CURTHREAD ? CURTHREAD->t_sigmask : 0UL);
             return proc_thread_signal_sigmask((ulong)arg1);
             
         case PTSIG_BLOCK:
@@ -545,7 +584,7 @@ long _cdecl sys_p_thread_sync(long operator, long arg1, long arg2) {
             return thread_semaphore_down((struct semaphore *)arg1);
 
         case THREAD_SYNC_SEM_POST:
-            TRACE_THREAD("SYSCALL THREAD_SYNC_SEM_POST");
+            TRACE_THREAD("SYSCALL THREAD_SYNC_SEM_POST, arg1=%p", arg1);
             return thread_semaphore_up((struct semaphore *)arg1);
 
         case THREAD_SYNC_MUTEX_LOCK:
@@ -561,7 +600,7 @@ long _cdecl sys_p_thread_sync(long operator, long arg1, long arg2) {
             return thread_mutex_unlock((struct mutex *)arg1);
             
         case THREAD_SYNC_MUTEX_INIT:
-            TRACE_THREAD("SYSCALL THREAD_SYNC_MUTEX_INIT");
+            TRACE_THREAD("SYSCALL THREAD_SYNC_MUTEX_INIT, arg1=%p, arg2=%p", arg1, arg2);
             return thread_mutex_init((struct mutex *)arg1, (const struct mutex_attr *)arg2);
 
         case THREAD_SYNC_MUTEX_DESTROY:
@@ -658,8 +697,8 @@ long _cdecl sys_p_thread_sync(long operator, long arg1, long arg2) {
              * Actually no mintlib calls exists for this
              * Semaphore is directly initialized in userspace
             */
-            TRACE_THREAD("SYSCALL THREAD_SYNC_SEM_INIT");
-            return thread_semaphore_init((struct semaphore *)arg1);
+            TRACE_THREAD("SYSCALL THREAD_SYNC_SEM_INIT, arg1=%p, arg2=%ld", arg1, arg2);
+            return thread_semaphore_init((struct semaphore *)arg1, (long)arg2);
 
         case THREAD_SYNC_JOIN:
             TRACE_THREAD("SYSCALL THREAD_SYNC_JOIN");
@@ -767,20 +806,20 @@ long _cdecl sys_p_thread_sync(long operator, long arg1, long arg2) {
 
 long _cdecl sys_p_pthread(long syscall_func, long arg1, long arg2, long arg3) {
 
-    TRACE_THREAD("SYSCALL - IN KERNEL: sys_p_pthread: CURPROC ID =%d, CURTHREAD ID =%d", curproc->pid, CURTHREAD ? CURTHREAD->tid : -1);
+    TRACE_THREAD_VERBOSE("SYSCALL - IN KERNEL: sys_p_pthread: CURPROC ID =%d, CURTHREAD ID =%d", curproc->pid, CURTHREAD ? CURTHREAD->tid : -1);
     
     switch (syscall_func) {
 
         case P_THREAD_CTRL:
-            TRACE_THREAD("SYSCALL P_THREAD_CTRL: arg1=%ld, arg2=%ld", arg1, arg2);
+            TRACE_THREAD_VERBOSE("SYSCALL P_THREAD_CTRL: arg1=%ld, arg2=%ld", arg1, arg2);
             return sys_p_thread_ctrl(arg1, arg2, arg3);
             
         case P_THREAD_SYNC:
-            TRACE_THREAD("SYSCALL P_THREAD_SYNC: arg1=%ld, arg2=%ld, arg3=%ld", arg1, arg2, arg3);
+            TRACE_THREAD_VERBOSE("SYSCALL P_THREAD_SYNC: arg1=%ld, arg2=%ld, arg3=%ld", arg1, arg2, arg3);
             return sys_p_thread_sync(arg1, arg2, arg3);
             
         case P_THREAD_SIGNAL:
-            TRACE_THREAD("SYSCALL P_THREAD_SIGNAL: arg1=%ld, arg2=%ld, arg3=%ld", arg1, arg2, arg3);
+            TRACE_THREAD_VERBOSE("SYSCALL P_THREAD_SIGNAL: arg1=%ld, arg2=%ld, arg3=%ld", arg1, arg2, arg3);
             return sys_p_thread_signal(arg1, arg2, arg3);
             
         case PSCHED_SETPARAM:
@@ -840,7 +879,7 @@ long _cdecl sys_p_pthread(long syscall_func, long arg1, long arg2, long arg3) {
             return !((volatile long *)arg1) ? EINVAL : atomic_xor((volatile long *)arg1, (long)arg2);
 
         case THREAD_ATOMIC_TAS:
-            TRACE_THREAD("SYSCALL THREAD_ATOMIC_TAS");
+            TRACE_THREAD_VERBOSE("SYSCALL THREAD_ATOMIC_TAS");
             return !((volatile unsigned short *)arg1) ? EINVAL : atomic_tas_try_lock((volatile unsigned short *)arg1);
 
         default:

@@ -27,7 +27,7 @@ struct semaphore {
 
 long thread_semaphore_up(struct semaphore *sem);
 long thread_semaphore_down(struct semaphore *sem);
-long thread_semaphore_init(struct semaphore *sem);
+long thread_semaphore_init(struct semaphore *sem, long initial_value);
 
 long thread_semaphore_timeddown(struct semaphore *sem, long ms);
 long thread_semaphore_trydown(struct semaphore *sem);

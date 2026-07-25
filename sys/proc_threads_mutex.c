@@ -24,6 +24,7 @@ static inline void mutex_priority_ceiling(struct mutex *mutex, struct thread *t,
     } else {
         t->priority = mutex->saved_priority;
     }
+    TRACE_THREAD("MUTEX CEILING: Set thread %d priority from %d to %d", t->tid, mutex->saved_priority, t->priority);
 }
 
 /* Skip the call entirely unless PRIO_PROTECT is actually in use --
@@ -52,7 +53,7 @@ int thread_mutexattr_init(struct mutex_attr *attr) {
     if (CURTHREAD) {
         attr->prioceiling = CURTHREAD->priority;  /* Default to current thread's priority */
     } else {
-        attr->prioceiling = MAX(scale_thread_priority(-curproc->pri), 1);  /* Default to process's priority if no current thread */
+        attr->prioceiling = 1;  /* Default priority if no current thread */
     }
     return THREAD_SUCCESS;
 }
@@ -78,7 +79,7 @@ int thread_mutex_init(struct mutex *mutex, const struct mutex_attr *attr) {
         if (CURTHREAD) {
             mutex->prioceiling = (int)CURTHREAD->priority;  /* Default to current thread's priority */
         } else {
-            mutex->prioceiling = (int)MAX(scale_thread_priority(-curproc->pri), 1);  /* Default to process's priority if no current thread */
+            mutex->prioceiling = 1;  /* Default priority if no current thread */
         }
     }
     TRACE_THREAD("MUTEX INIT: Initialized mutex %p with type %d, protocol %d, prioceiling %d",
@@ -152,7 +153,9 @@ int thread_mutex_lock(struct mutex *mutex) {
 
     spl(sr);                          /* don't hold IPL across the yield */
 
+    TRACE_THREAD_VERBOSE("MUTEX LOCK: Calling proc_thread_schedule()");
     proc_thread_schedule();
+    TRACE_THREAD_VERBOSE("MUTEX LOCK: Back from proc_thread_schedule()");
 
     if (t->wakeup_time > 0) {
         t->wakeup_time = 0;
@@ -175,14 +178,24 @@ int thread_mutex_unlock(struct mutex *mutex) {
     register unsigned short sr;
     struct thread *highest = NULL;
 
-    if (!mutex) return EINVAL;
+    if (!mutex) {
+        TRACE_THREAD("MUTEX UNLOCK: NULL mutex");
+        return EINVAL;
+    }
     current = CURTHREAD;
-    if (!current) return EINVAL;
+    if (!current) {
+        TRACE_THREAD("MUTEX UNLOCK: NULL current thread");
+        return EINVAL;
+    }
 
-    if (mutex->owner != current) return EPERM;
+    if (mutex->owner != current) {
+        TRACE_THREAD("MUTEX UNLOCK: Not owner of mutex");
+        return EPERM;
+    }
 
     if (mutex->type == PTHREAD_MUTEX_RECURSIVE && mutex->lock_count > 1) {
         sr = splhigh();
+        TRACE_THREAD("MUTEX UNLOCK: Recursive lock count %d, decrementing", mutex->lock_count);
         mutex->lock_count--;
         spl(sr);
         return THREAD_SUCCESS;
@@ -197,6 +210,8 @@ int thread_mutex_unlock(struct mutex *mutex) {
     if (mutex->wait_queue) {
         struct thread *prev = NULL;
         highest = find_highest_priority_thread_in_queue(mutex->wait_queue, &prev);
+
+        TRACE_THREAD("MUTEX UNLOCK: highest priority thread %p", highest);
 
         if (highest) {
             if (prev) prev->next_wait = highest->next_wait;
@@ -222,6 +237,7 @@ int thread_mutex_unlock(struct mutex *mutex) {
     }
 
     if (!highest) {
+        TRACE_THREAD("MUTEX UNLOCK: No highest priority thread");
         mutex->locked = 0;
         mutex->owner = NULL;
         mutex->lock_count = 0;
@@ -230,9 +246,13 @@ int thread_mutex_unlock(struct mutex *mutex) {
 
     spl(sr);
 
-    if (highest && highest->priority > current->priority)
+    if (highest && highest->priority > current->priority){
+        TRACE_THREAD_VERBOSE("MUTEX UNLOCK: Calling proc_thread_schedule()");
         proc_thread_schedule();
-
+        TRACE_THREAD_VERBOSE("MUTEX UNLOCK: Back from proc_thread_schedule()");
+    }
+    
+    TRACE_THREAD("MUTEX UNLOCK: Success");
     return THREAD_SUCCESS;
 }
 

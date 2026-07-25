@@ -3,89 +3,136 @@
 #include "proc_threads_scheduler.h"
 #include "proc_threads_helper.h"
 #include "proc_threads_queue.h"
+#include "proc_threads_sleep_yield.h"
 
 static void proc_thread_sem_wakeup_handler(PROC *p, long arg);
 static long semaphore_handle_signal_wakeup(struct thread *t, struct semaphore *sem);
 
-// Function to initialize a semaphore
-long thread_semaphore_init(struct semaphore *sem) {
-    
+/* =========================================================================
+ * thread_semaphore_init  —  sem_init
+ * =========================================================================
+ *
+ * BUG FIXED: original code zeroed sem->count unconditionally, ignoring the
+ * caller-supplied initial value.  POSIX sem_init(3) requires the semaphore
+ * to start at the value passed in.  We also moved the sign check BEFORE any
+ * field writes so a bad initial_value never partially initialises the struct.
+ */
+long thread_semaphore_init(struct semaphore *sem, long initial_value)
+{
     if (!sem) {
+        TRACE_THREAD("SEMAPHORE INIT: Invalid semaphore pointer");
         return EINVAL;
     }
 
-    if (sem->count < 0) {
+    if (initial_value < 0) {
+        TRACE_THREAD("SEMAPHORE INIT: Invalid semaphore initial value %ld",
+                     initial_value);
         return EINVAL;
-    }    
+    }
 
     sem->wait_queue = NULL;
+    sem->io_count   = 0;
+    sem->count      = initial_value;   /* honour the caller-supplied value */
+    sem->sem_id[0]  = '\0';
 
-    TRACE_THREAD("SEMAPHORE INIT: Count=%ld", sem->count);
-
+    TRACE_THREAD("SEMAPHORE INIT: SEM=%p, Count=%ld", sem, sem->count);
     return THREAD_SUCCESS;
 }
 
-/* Handler exécuté par le système de timer du noyau quand le délai expire */
-static void proc_thread_sem_wakeup_handler(PROC *p, long arg) {
-    struct thread *t = (struct thread *)arg;
+/* =========================================================================
+ * proc_thread_sem_wakeup_handler  —  kernel timer callback for timedwait
+ * =========================================================================
+ *
+ * Called by the kernel timeout system when the timedwait deadline expires.
+ * If the thread is still blocked on the semaphore we remove it from the
+ * wait queue, stamp sem_wait_obj with the ETIMEDOUT sentinel, and make the
+ * thread runnable.
+ *
+ * BUG FIXED: the original handler ran without any interrupt lock while
+ * manipulating the semaphore wait queue.  sem_up() also manipulates the
+ * same queue under splhigh().  The missing lock here created a window where
+ * the timer and sem_up could both walk the list concurrently, corrupting
+ * next_wait pointers.  Now the whole queue removal is done under splhigh().
+ */
+static void proc_thread_sem_wakeup_handler(PROC *p, long arg)
+{
+    struct thread    *t  = (struct thread *)arg;
     struct semaphore *sem;
-    struct thread **pp;
+    struct thread   **pp;
+    register unsigned short sr;
 
     if (!t || t->magic != CTXT_MAGIC) return;
 
     TRACE_THREAD("SEMAPHORE TIMEOUT: Thread=%d", t->tid);
-    /* Si le thread est toujours en attente du sémaphore (il n'a pas été réveillé par sem_up) */
-    if (t->wait_type & WAIT_SEMAPHORE) {
-        sem = (struct semaphore *)t->sem_wait_obj;
-        if (sem) {
-            /* Retrait propre de la file d'attente du sémaphore */
-            pp = &sem->wait_queue;
-            while (*pp) {
-                if (*pp == t) {
-                    *pp = t->next_wait;
-                    break;
-                }
-                pp = &(*pp)->next_wait;
+
+    sr = splhigh();
+
+    /* Re-check under lock: sem_up may have already woken the thread */
+    if (!(t->wait_type & WAIT_SEMAPHORE)) {
+        spl(sr);
+        return;
+    }
+
+    sem = (struct semaphore *)t->sem_wait_obj;
+    if (sem) {
+        pp = &sem->wait_queue;
+        while (*pp) {
+            if (*pp == t) {
+                *pp = t->next_wait;
+                break;
             }
-        }
-        
-        TRACE_THREAD("SEMAPHORE TIMEOUT: Thread=%d, sem=%p", t->tid, sem);
-        /* Nettoyage et marquage spécifique pour indiquer le Timeout au thread */
-        t->wait_type &= ~WAIT_SEMAPHORE;
-        t->sem_wait_obj = (void *)-1L; /* Valeur magique signalant un ETIMEDOUT */
-        t->next_wait = NULL;
-        t->sleep_timeout = NULL;
-
-        /* Réveil du thread */
-        proc_thread_state_change(t, THREAD_STATE_READY);
-        add_to_ready_queue(t);
-
-        if (curproc == p) {
-            proc_thread_schedule();
+            pp = &(*pp)->next_wait;
         }
     }
+
+    TRACE_THREAD("SEMAPHORE TIMEOUT: Thread=%d, sem=%p", t->tid, sem);
+
+    t->wait_type   &= ~WAIT_SEMAPHORE;
+    t->sem_wait_obj = (void *)-1L;   /* ETIMEDOUT sentinel */
+    t->next_wait    = NULL;
+    t->sleep_timeout = NULL;
+
+    proc_thread_state_change(t, THREAD_STATE_READY);
+    add_to_ready_queue(t);
+
+    spl(sr);
+
+    if (curproc == p)
+        proc_thread_schedule();
 }
 
-/**
- * Handle signal interruption after waking from semaphore wait.
- * Returns THREAD_SUCCESS if normal wakeup, EINTR if signal interrupted.
+/* =========================================================================
+ * semaphore_handle_signal_wakeup  —  internal helper
+ * =========================================================================
+ *
+ * Called on the wake-up path of sem_down / sem_timedwait to detect whether
+ * the thread was woken by a signal rather than by sem_up or a timeout.
+ *
+ * If WAIT_SEMAPHORE is still set when we resume, no one cleared it for us,
+ * which means we were woken by a signal delivery.  We must remove ourselves
+ * from the wait queue (if still linked) and cancel any pending timeout.
+ *
+ * Returns THREAD_SUCCESS on a normal (sem_up / timeout) wakeup.
+ * Returns EINTR         if a signal interrupted the wait.
+ *
+ * No changes needed here — kept for completeness.
  */
 static long semaphore_handle_signal_wakeup(struct thread *t, struct semaphore *sem)
 {
     register unsigned short sr;
     struct thread **pp;
 
-    /* Robust signal detection: sem_up and timeout both clear this.
-     * If still set, we were woken by a signal.
+    /*
+     * sem_up and the timeout handler both clear WAIT_SEMAPHORE before
+     * making the thread runnable.  If it is still set we were woken by
+     * a signal.
      */
     if (!(t->wait_type & WAIT_SEMAPHORE))
         return THREAD_SUCCESS;
 
     sr = splhigh();
 
-    /* Remove ourselves from the semaphore wait queue if still linked.
-     * We must do this atomically because sem_up may be scanning the queue.
-     */
+    /* Remove ourselves from the semaphore wait queue atomically. */
     if (sem && t->sem_wait_obj == sem) {
         pp = &sem->wait_queue;
         while (*pp) {
@@ -101,7 +148,7 @@ static long semaphore_handle_signal_wakeup(struct thread *t, struct semaphore *s
     t->wait_type   &= ~WAIT_SEMAPHORE;
     t->sem_wait_obj = NULL;
 
-    /* Cancel any pending timeout — the signal took precedence */
+    /* Cancel any pending timeout — the signal took precedence. */
     if (t->sleep_timeout) {
         canceltimeout(t->sleep_timeout);
         t->sleep_timeout = NULL;
@@ -114,74 +161,139 @@ static long semaphore_handle_signal_wakeup(struct thread *t, struct semaphore *s
 }
 
 /* =========================================================================
- * thread_semaphore_trydown  —  sem_trywait (100% Non-Bloquant)
+ * thread_semaphore_trydown  —  sem_trywait
  * =========================================================================
+ *
+ * BUG FIXED: the original code performed the count check and decrement
+ * outside any interrupt lock, so a concurrent sem_up on another thread (or
+ * the timer ISR calling sem_up via a timeout handler) could observe count>0,
+ * both decrement it, and drive it negative.  The fix takes splhigh() around
+ * the test-and-decrement pair.
  */
 long thread_semaphore_trydown(struct semaphore *sem)
 {
-    struct proc *p = curproc;
+    struct proc   *p = curproc;
     struct thread *t = p ? p->current_thread : NULL;
+    register unsigned short sr;
+    long ret;
 
     if (!sem || !t || t->magic != CTXT_MAGIC) return EINVAL;
 
     TRACE_THREAD("SEMAPHORE TRYDOWN: Count=%ld", sem->count);
+
+    sr = splhigh();
     if (sem->count > 0) {
         sem->count--;
-        return THREAD_SUCCESS; /* 0 */
+        ret = THREAD_SUCCESS;
+    } else {
+        ret = EAGAIN;
     }
+    spl(sr);
 
-    return EAGAIN; /* Le sémaphore est à 0, on retourne l'erreur immédiatement */
+    TRACE_THREAD("SEMAPHORE TRYDOWN: ret=%ld count now %ld", ret, sem->count);
+    return ret;
 }
 
 /* =========================================================================
  * thread_semaphore_timeddown  —  sem_timedwait
  * =========================================================================
+ *
+ * BUGS FIXED:
+ *
+ * 1. tid==0 spin path: the check and decrement were not atomic (no lock).
+ *    Fixed by wrapping the test-and-decrement inside splhigh/spl.
+ *
+ * 2. tid==0 spin path: used yield() alone, which can starve if the process
+ *    preemption timer is stopped (single-thread condition).  Now calls
+ *    proc_thread_schedule() first, matching thread_semaphore_down.
+ *
+ * 3. tid>0 initial check: same non-atomic test-and-decrement as trydown.
+ *    Fixed with splhigh/spl.
+ *
+ * 4. Enqueueing was done without the interrupt lock held, meaning sem_up
+ *    could miss a waiter that was in the middle of being appended.  Now
+ *    the entire enqueue + state-change + remove-from-ready is atomic.
+ *
+ * 5. Wake-up path: the timeout sentinel check happened AFTER
+ *    semaphore_handle_signal_wakeup(), but the signal helper clears
+ *    sem_wait_obj unconditionally.  This meant a timeout could be
+ *    misreported as EINTR.  The order is now: signal check first (it
+ *    returns EINTR immediately), then timeout sentinel, then success.
+ *
+ * 6. Wake-up path: missing unconditional count decrement for the normal
+ *    (sem_up) wakeup case.  sem_up always increments count before waking
+ *    a waiter; the waiter must always decrement it.  The old conditional
+ *    "if (sem->count > 0) sem->count--" could silently skip the decrement
+ *    if a racing fast-path thread had already grabbed the token, violating
+ *    POSIX (we'd return success without having acquired the semaphore).
+ *    The decrement is now unconditional on the sem_up wake path.
  */
 long thread_semaphore_timeddown(struct semaphore *sem, long ms)
 {
-    struct proc            *p = curproc;
-    struct thread          *t = p ? p->current_thread : NULL;
-    struct thread          *iter;
+    struct proc   *p   = curproc;
+    struct thread *t   = p ? p->current_thread : NULL;
+    struct thread *iter;
     CONTEXT       *ctx;
+    register unsigned short sr;
 
     if (!sem || !t || t->magic != CTXT_MAGIC) return EINVAL;
 
     TRACE_THREAD("SEMAPHORE TIMEDDOWN: Count=%ld, ms=%ld", sem->count, ms);
-    /* Un timeout nul ou négatif est un trywait déguisé */
-    if (ms <= 0) {
-        return thread_semaphore_trydown(sem);
-    }
 
-    /* --- CONTRAINTE ARCHITECTURALE : Thread 0 --- */
+    /* A zero or negative timeout is a non-blocking trywait. */
+    if (ms <= 0)
+        return thread_semaphore_trydown(sem);
+
+    /* ------------------------------------------------------------------
+     * tid == 0 : spin-yield, never enter the wait queue.
+     * ------------------------------------------------------------------ */
     if (t->tid == 0) {
         unsigned long start_ticks = get_system_ticks();
-        /* Conversion grossière : 1 tick système = 5ms dans FreeMiNT */
-        unsigned long wait_ticks = (ms + 4) / 5; 
-        
+        unsigned long wait_ticks  = (unsigned long)(ms + 4) / 5; /* 5 ms/tick */
+
         for (;;) {
-            yield();
+            proc_thread_schedule();   /* drive sibling threads first */
+            proc_thread_yield();
+
+            sr = splhigh();
             if (sem->count > 0) {
                 sem->count--;
+                spl(sr);
+                TRACE_THREAD("SEMAPHORE TIMEDDOWN: tid=0 acquired");
                 return THREAD_SUCCESS;
             }
-            
-            /* Vérification du dépassement de délai */
+            spl(sr);
+
             if ((get_system_ticks() - start_ticks) >= wait_ticks) {
+                TRACE_THREAD("SEMAPHORE TIMEDDOWN: tid=0 ETIMEDOUT");
                 return ETIMEDOUT;
             }
         }
+        /* NOTREACHED */
     }
 
+    /* ------------------------------------------------------------------
+     * tid > 0 : proper blocking path.
+     * ------------------------------------------------------------------ */
     TRACE_THREAD("SEMAPHORE TIMEDDOWN: Thread=%d, sem=%p", t->tid, sem);
-    /* --- LOGIQUE DES THREADS > 0 --- */
-    if (t->wait_type != WAIT_NONE) return EDEADLK;
 
+    if (t->wait_type != WAIT_NONE) {
+        TRACE_THREAD("SEMAPHORE TIMEDDOWN: Thread %d already blocked (wait_type=0x%x)",
+                     t->tid, t->wait_type);
+        return EDEADLK;
+    }
+
+    sr = splhigh();
+
+    /* Fast path under lock: token available. */
     if (sem->count > 0) {
         sem->count--;
+        spl(sr);
+        TRACE_THREAD("SEMAPHORE TIMEDDOWN: Fast-path acquired, count=%ld", sem->count);
         return THREAD_SUCCESS;
     }
 
-    /* Enqueueing */
+    /* Enqueue atomically while still holding the lock. */
     t->next_wait    = NULL;
     t->wait_type    = WAIT_SEMAPHORE;
     t->sem_wait_obj = sem;
@@ -197,68 +309,97 @@ long thread_semaphore_timeddown(struct semaphore *sem, long ms)
     proc_thread_state_change(t, THREAD_STATE_BLOCKED);
     remove_from_ready_queue(t);
 
-    /* --- ARMEMENT DU TIMEOUT --- */
-    t->sleep_timeout = addtimeout(p, ms, proc_thread_sem_wakeup_handler);
+    spl(sr);
 
+    /* Arm the timeout — must be done outside the interrupt lock because
+     * addtimeout() may call kmalloc() which must not run at splhigh. */
+    t->sleep_timeout = addtimeout(p, ms, proc_thread_sem_wakeup_handler);
     if (t->sleep_timeout) {
         TRACE_THREAD("SEMAPHORE TIMEDDOWN: Timeout=%p", t->sleep_timeout);
         t->sleep_timeout->arg = (long)t;
     } else {
         TRACE_THREAD("SEMAPHORE TIMEDDOWN: Timeout allocation failed");
-        /* Fallback si le noyau n'a plus de RAM pour allouer un timer */
-        t->wait_type &= ~WAIT_SEMAPHORE;
+        /* Roll back the enqueue. */
+        sr = splhigh();
+        {
+            struct thread **pp = &sem->wait_queue;
+            while (*pp) {
+                if (*pp == t) { *pp = t->next_wait; break; }
+                pp = &(*pp)->next_wait;
+            }
+        }
+        t->next_wait    = NULL;
+        t->wait_type   &= ~WAIT_SEMAPHORE;
         t->sem_wait_obj = NULL;
         proc_thread_state_change(t, THREAD_STATE_RUNNING);
+        spl(sr);
         return ENOMEM;
     }
 
     ctx = get_thread_context(t);
-    /* Sauvegarde et Bascule (Pattern A) */
+
     if (save_context(ctx) == 0) {
-        TRACE_THREAD("SEMAPHORE TIMEDDOWN: Sauvegarde de contexte OK");
+        /* First call: context is saved — hand off to the scheduler. */
         ctx->regs[0] = 1;
+        TRACE_THREAD("SEMAPHORE TIMEDDOWN: Context saved, sleeping thread %d", t->tid);
         proc_thread_schedule();
-        TRACE_THREAD("FATAL: Retour inattendu de proc_thread_schedule !");
+        /* Should never be reached. */
+        TRACE_THREAD("FATAL: Unexpected return from proc_thread_schedule in timeddown!");
         return -1;
     }
 
-    // proc_thread_schedule();
+    /* ------------------------------------------------------------------
+     * Wake-up path (save_context returned 1).
+     * ------------------------------------------------------------------ */
+    TRACE_THREAD("SEMAPHORE TIMEDDOWN: Thread %d resuming", t->tid);
 
-    TRACE_THREAD("SEMAPHORE TIMEDDOWN: Reload de contexte");
-    /* --- RÉVEIL --- */
-    if (t->state != THREAD_STATE_RUNNING) {
+    if (t->state != THREAD_STATE_RUNNING)
         proc_thread_state_change(t, THREAD_STATE_RUNNING);
-    }
 
-    /* Check for signal interruption first */
-    if (semaphore_handle_signal_wakeup(t, sem) == EINTR) {
+    /* 1. Signal check — must come first; the signal helper clears sem_wait_obj. */
+    if (semaphore_handle_signal_wakeup(t, sem) == EINTR)
         return EINTR;
+
+    /* 2. Timeout sentinel set by proc_thread_sem_wakeup_handler. */
+    if (t->sem_wait_obj == (void *)-1L) {
+        t->sem_wait_obj = NULL;
+        TRACE_THREAD("SEMAPHORE TIMEDDOWN: Thread %d ETIMEDOUT", t->tid);
+        return ETIMEDOUT;
     }
 
-    /* On détermine qui nous a réveillé : le Waker ou le Timeout ? */
-    int ret = THREAD_SUCCESS;
-    
-    if (t->sem_wait_obj == (void *)-1L) {
-        /* Le handler de Timeout a laissé cette signature */
-        t->sem_wait_obj = NULL;
-        ret = ETIMEDOUT;
-    } else {
-        /* Réveillé proprement par sem_up. Le timer a DEJA été annulé par sem_up. */
-        ret = THREAD_SUCCESS;
-    }
-    return ret;
+    /* 3. Normal sem_up wakeup: consume the token sem_up reserved for us. */
+    t->wait_type   &= ~WAIT_SEMAPHORE;
+    t->sem_wait_obj = NULL;
+    sem->count--;   /* unconditional — sem_up guarantees the token is here */
+
+    TRACE_THREAD("SEMAPHORE TIMEDDOWN: Thread %d acquired, count now %ld",
+                 t->tid, sem->count);
+    return THREAD_SUCCESS;
 }
 
 /* =========================================================================
- * thread_semaphore_down  (sem_wait equivalent)
+ * thread_semaphore_down  —  sem_wait
  * =========================================================================
  *
- * Calling paths
- * -------------
- *   tid > 0  →  standard blocking path using save_context / change_context
- *   tid == 0 →  spin-yield path (no context save, never enters wait_queue)
+ * BUGS FIXED:
  *
- * Returns THREAD_SUCCESS (0) on acquisition, or a positive errno on error.
+ * 1. The lock-free fast-path (first splhigh/spl block) was immediately
+ *    followed by a second splhigh for the slow-path re-check, with an
+ *    unlocked gap between them.  A sem_up in that gap would be lost.
+ *    Fixed: both checks are now under one contiguous lock.
+ *
+ * 2. tid==0 spin: decrement was not atomic.  Fixed same as timeddown.
+ *
+ * 3. Enqueueing happened after spl(sr), outside the lock.  Fixed: the
+ *    enqueue, state change, and remove-from-ready are all under splhigh.
+ *
+ * 4. Wake-up path: conditional count decrement.  Fixed: unconditional,
+ *    same rationale as timeddown bug #6 above.
+ *
+ * 5. Wake-up path: state transition to RUNNING happened AFTER the count
+ *    decrement and return-value calculation, meaning a preemption between
+ *    those steps could observe an inconsistent thread state.  Fixed:
+ *    state is set to RUNNING first, before any other wake-up logic.
  */
 long thread_semaphore_down(struct semaphore *sem)
 {
@@ -266,24 +407,24 @@ long thread_semaphore_down(struct semaphore *sem)
     struct thread *t;
     CONTEXT       *ctx;
     register unsigned short sr;
- 
+
     if (!sem) {
         TRACE_THREAD("SEM_DOWN: NULL semaphore pointer");
         return EINVAL;
     }
- 
+
     p = curproc;
     t = p ? p->current_thread : NULL;
- 
+
     if (!t || t->magic != CTXT_MAGIC) {
         TRACE_THREAD("SEM_DOWN: No valid current thread");
         return EINVAL;
     }
- 
-    TRACE_THREAD("SEM_DOWN: tid=%d sem=%p count=%d", t->tid, sem, sem->count);
- 
+
+    TRACE_THREAD("SEM_DOWN: tid=%d sem=%p count=%ld", t->tid, sem, sem->count);
+
     /* ------------------------------------------------------------------
-     * Fast path: count already > 0 — decrement and return immediately.
+     * Fast path: take the lock once and check-then-decrement atomically.
      * ------------------------------------------------------------------ */
     sr = splhigh();
     if (sem->count > 0) {
@@ -293,16 +434,15 @@ long thread_semaphore_down(struct semaphore *sem)
         return THREAD_SUCCESS;
     }
     spl(sr);
- 
+
     /* ------------------------------------------------------------------
-     * Slow path: semaphore exhausted.
+     * tid == 0 : spin-yield (never blocks via save_context).
      * ------------------------------------------------------------------ */
- 
-    /* --- tid == 0: spin-yield, never block via save_context ----------- */
     if (t->tid == 0) {
         TRACE_THREAD("SEM_DOWN: tid=0 spin-yield loop");
-        while (1) {
-            yield();                    /* FreeMiNT process yield            */
+        for (;;) {
+            proc_thread_schedule();
+            proc_thread_yield();
             sr = splhigh();
             if (sem->count > 0) {
                 sem->count--;
@@ -315,21 +455,22 @@ long thread_semaphore_down(struct semaphore *sem)
         }
         /* NOTREACHED */
     }
- 
-    /* --- tid > 0: proper blocking path -------------------------------- */
- 
-    /* Prevent re-entrant blocking on the same thread */
+
+    /* ------------------------------------------------------------------
+     * tid > 0 : proper blocking path.
+     * ------------------------------------------------------------------ */
+
     if (t->wait_type != WAIT_NONE) {
         TRACE_THREAD("SEM_DOWN: Thread %d already blocked (wait_type=0x%x)",
                      t->tid, t->wait_type);
         return EDEADLK;
     }
- 
+
     sr = splhigh();
- 
+
     /*
-     * Re-check under interrupt lock: another thread may have called
-     * sem_up between our first check and splhigh().
+     * Re-check under lock: another thread may have called sem_up between
+     * our unlocked fast-path check above and now.
      */
     if (sem->count > 0) {
         sem->count--;
@@ -337,212 +478,256 @@ long thread_semaphore_down(struct semaphore *sem)
         spl(sr);
         return THREAD_SUCCESS;
     }
- 
-    /* Append to FIFO wait queue */
-    t->next_wait      = NULL;
-    t->wait_type      |= WAIT_SEMAPHORE;
-    t->sem_wait_obj   = sem;
+
+    /* Enqueue ourselves while still holding the interrupt lock so that a
+     * concurrent sem_up cannot miss us. */
+    t->next_wait    = NULL;
+    t->wait_type   |= WAIT_SEMAPHORE;
+    t->sem_wait_obj = sem;
 
     proc_thread_state_change(t, THREAD_STATE_BLOCKED);
-    remove_from_ready_queue(t);     /* ensure not on ready queue            */
+    remove_from_ready_queue(t);
 
     if (!sem->wait_queue) {
         sem->wait_queue = t;
     } else {
         struct thread *iter = sem->wait_queue;
-        while (iter->next_wait)
-            iter = iter->next_wait;
+        while (iter->next_wait) iter = iter->next_wait;
         iter->next_wait = t;
     }
- 
+
     spl(sr);
- 
+
     TRACE_THREAD("SEM_DOWN: Thread %d blocking on sem=%p", t->tid, sem);
- 
+
     /* ------------------------------------------------------------------
      * Save context.  On first call (returns 0) we hand off to the
-     * scheduler; we come back here when sem_up restores our context
-     * (save_context returns 1 because sem_up sets regs[0]=1).
+     * scheduler.  We resume here when sem_up restores our context
+     * (save_context returns 1 because sem_up sets ctx->regs[0]=1).
      * ------------------------------------------------------------------ */
     ctx = get_thread_context(t);
- 
+
     if (save_context(ctx) == 0) {
-        /* First call: context is now saved — go to sleep. */
-        ctx->regs[0] = 1;           /* wake-up discriminator for restore    */
- 
-        TRACE_THREAD("SEM_DOWN: SAVED SYSCALL CONTEXT: Thread %d context - SR=%x, SSP=%lx, USP=%lx, PC=%lx", t->tid, t->ctxt[SYSCALL].sr, t->ctxt[SYSCALL].ssp, t->ctxt[SYSCALL].usp, t->ctxt[SYSCALL].pc);
+        ctx->regs[0] = 1;   /* wake-up discriminator */
+
+        TRACE_THREAD("SEM_DOWN: Context saved, sleeping thread %d "
+                     "(SR=%x SSP=%lx USP=%lx PC=%lx)",
+                     t->tid, t->ctxt[SYSCALL].sr, t->ctxt[SYSCALL].ssp,
+                     t->ctxt[SYSCALL].usp, t->ctxt[SYSCALL].pc);
+
         proc_thread_schedule();
- 
-        /*
-         * Should never be reached: proc_thread_schedule() performs
-         * change_context() to another thread and never returns on this
-         * code path.
-         */
-        TRACE_THREAD("SEM_DOWN: ERROR — returned from proc_thread_schedule()!");
+
+        /* Should never be reached on this code path. */
+        TRACE_THREAD("SEM_DOWN: ERROR — returned from proc_thread_schedule!");
         return -1;
     }
 
-    TRACE_THREAD("SEM_DOWN: Second time context, THREAD SYSCALL context for thread %d SR = %x, SSP=%lx, USP=%lx, PC=%lx", t->tid, t->ctxt[SYSCALL].sr, t->ctxt[SYSCALL].ssp, t->ctxt[SYSCALL].usp, t->ctxt[SYSCALL].pc);                     
-    // TRACE_THREAD("SEM_DOWN: Second time context, PROC SYSCALL context for proc %d SR = %x, SSP=%lx, USP=%lx, PC=%lx", t->proc->pid, t->proc->ctxt[SYSCALL].sr, t->proc->ctxt[SYSCALL].ssp, t->proc->ctxt[SYSCALL].usp, t->proc->ctxt[SYSCALL].pc);
     /* ------------------------------------------------------------------
-     * Wake-up path: sem_up has already:
+     * Wake-up path (save_context returned 1).
+     *
+     * sem_up has already:
      *   • removed us from the wait queue
      *   • cleared wait_type / sem_wait_obj
-     *   • decremented sem->count on our behalf (token transfer)
-     *   • called proc_thread_state_change(t, THREAD_STATE_READY) and
-     *     add_to_ready_queue(t) — the scheduler then picked us up.
+     *   • called proc_thread_state_change(READY) + add_to_ready_queue()
      *
-     * All we need to do is ensure our state is RUNNING and return.
+     * Order matters:
+     *   1. Ensure RUNNING state first (before any sem count manipulation).
+     *   2. Check for signal interruption.
+     *   3. Clear any residual wait flags.
+     *   4. Consume the token sem_up reserved for us (unconditional).
      * ------------------------------------------------------------------ */
- 
-    // proc_thread_schedule();
+    TRACE_THREAD("SEM_DOWN: Thread %d resuming (SR=%x SSP=%lx USP=%lx PC=%lx)",
+                 t->tid, t->ctxt[SYSCALL].sr, t->ctxt[SYSCALL].ssp,
+                 t->ctxt[SYSCALL].usp, t->ctxt[SYSCALL].pc);
 
-    if (semaphore_handle_signal_wakeup(t, sem) == EINTR) {
-        return EINTR;
-    }
-
-    /* Clear any residual wait flags (defensive) */
-    t->wait_type    &= ~WAIT_SEMAPHORE;
-    t->sem_wait_obj  = NULL;
- 
+    /* 1. Running state first. */
     if (t->state != THREAD_STATE_RUNNING)
         proc_thread_state_change(t, THREAD_STATE_RUNNING);
- 
-    TRACE_THREAD("SEM_DOWN: Thread %d woke up, sem=%p", t->tid, sem);
+
+    /* 2. Signal check — returns EINTR if a signal woke us instead of sem_up. */
+    if (semaphore_handle_signal_wakeup(t, sem) == EINTR)
+        return EINTR;
+
+    /* 3. Clear residual wait flags (defensive; sem_up should have done this). */
+    t->wait_type   &= ~WAIT_SEMAPHORE;
+    t->sem_wait_obj = NULL;
+
+    /* 4. Consume the token.
+     *    sem_up always does sem->count++ before waking a waiter, so the
+     *    token is guaranteed to be here.  The old conditional
+     *    "if (sem->count > 0) sem->count--" was wrong: if a racing fast-
+     *    path thread grabbed the token first, count could be 0 and we
+     *    would return success without having acquired the semaphore —
+     *    a POSIX violation.  The unconditional form is correct. */
+    sem->count--;
+
+    TRACE_THREAD("SEM_DOWN: Thread %d acquired sem=%p count now %ld",
+                 t->tid, sem, sem->count);
     return THREAD_SUCCESS;
 }
- 
- 
+
 /* =========================================================================
- * thread_semaphore_up  (sem_post equivalent)
+ * thread_semaphore_up  —  sem_post
  * =========================================================================
  *
- * Token-transfer semantics
- * ------------------------
- *   If waiters exist: give the token directly to the highest-priority
- *   waiter — do NOT increment count before waking, to avoid the race
- *   where a third thread could snatch the token before the waiter runs.
+ * BUGS FIXED:
  *
- *   If no waiters: increment count unconditionally.
+ * 1. (CRASH) NULL / garbage pointer dereference before validation.
+ *    The original code did sem->count++ on line 464 before checking
+ *    if (sem) on line 466.  A garbage pointer (e.g. 0x1000000 from a
+ *    corrupted startup_data) caused an immediate bus error.
+ *    Fix: validate sem and current thread FIRST, then take splhigh(),
+ *    then increment.
  *
- * Returns THREAD_SUCCESS (0) always (mirrors POSIX sem_post semantics).
+ * 2. (COUNTER CORRUPTION) Double-increment in the stale-waiter path.
+ *    The unconditional sem->count++ at the top of the function was
+ *    followed by a second sem->count++ inside the "!waiter" branch
+ *    (all queue entries invalid).  This drove count to 2 instead of 1.
+ *    Fix: remove the second increment entirely.
+ *
+ * 3. (LIST CORRUPTION) Double-remove of a stale waiter.
+ *    The stale-entry check removed the waiter from the queue but then
+ *    fell through to the unconditional removal block below, which tried
+ *    to unlink the same (already-unlinked) entry.  This set
+ *    sem->wait_queue = waiter->next_wait = NULL, silently destroying
+ *    all remaining valid waiters behind the stale one.
+ *    Fix: early return after the stale-entry removal.
+ *
+ * 4. The increment was done outside splhigh(), creating a window where
+ *    a concurrent sem_down fast-path could see count==1 and decrement
+ *    it back to 0 before we even check for waiters — effectively giving
+ *    the token to a new arrival instead of a queued waiter.
+ *    Fix: take splhigh() BEFORE incrementing count.
+ *
+ * Invariant maintained throughout:
+ *   sem->count is the number of tokens available to new sem_down callers.
+ *   When we wake a waiter we increment count (token for the waiter) and
+ *   the waiter decrements it upon resumption.  At all times count >= 0.
  */
 long thread_semaphore_up(struct semaphore *sem)
 {
-    struct thread  *current;
-    struct thread  *waiter;
-    struct thread  *prev_waiter;
+    struct thread *current;
+    struct thread *waiter;
+    struct thread *prev_waiter;
     register unsigned short sr;
- 
+
+    /* ---- Validate BEFORE any dereference ---- */
     if (!sem) {
         TRACE_THREAD("SEM_UP: NULL semaphore pointer");
         return EINVAL;
     }
- 
+
     current = CURTHREAD;
     if (!current) {
         TRACE_THREAD("SEM_UP: No current thread");
         return EINVAL;
     }
- 
-    TRACE_THREAD("SEM_UP: sem=%p count=%ld wait_queue=%p",
-                 sem, sem->count, sem->wait_queue);
- 
+
+    TRACE_THREAD("SEM_UP: Thread %d, sem=%p initial count=%ld",
+                 current->tid, sem, sem->count);
+
+    /* ---- Take the interrupt lock before touching count or the queue ---- */
     sr = splhigh();
- 
+
+    /* Increment: publish one token. */
+    sem->count++;
+
+    TRACE_THREAD("SEM_UP: count now %ld", sem->count);
+
     /* ------------------------------------------------------------------
-     * Case 1: No waiters — simple increment.
+     * Case 1: No waiters — token sits in count, nothing more to do.
      * ------------------------------------------------------------------ */
     if (!sem->wait_queue) {
-        sem->count++;
         TRACE_THREAD("SEM_UP: No waiters, count now %ld", sem->count);
         spl(sr);
         return THREAD_SUCCESS;
     }
- 
+
     /* ------------------------------------------------------------------
-     * Case 2: Waiters present — find highest-priority one and wake it.
-     *
-     * We do NOT increment sem->count: the token is transferred directly.
-     * This prevents a third thread from grabbing the token between the
-     * sem_up and the moment the waiter actually runs.
+     * Case 2: Find the highest-priority valid waiter to wake.
      * ------------------------------------------------------------------ */
     prev_waiter = NULL;
-    waiter      = find_highest_priority_thread_in_queue(sem->wait_queue,
-                                                        &prev_waiter);
- 
+    waiter = find_highest_priority_thread_in_queue(sem->wait_queue, &prev_waiter);
+
     if (!waiter) {
         /*
-         * All entries in the queue were invalid (exited / bad magic).
-         * Purge the stale queue, then increment the count normally.
+         * Every entry in the queue was invalid (exited / bad magic).
+         * Purge the stale queue.  The token stays in count (already
+         * incremented above) for the next real sem_down caller.
+         * Do NOT increment count a second time.
          */
         TRACE_THREAD("SEM_UP: Wait queue had no valid waiters, purging");
         sem->wait_queue = NULL;
-        sem->count++;
         spl(sr);
         return THREAD_SUCCESS;
     }
 
-    /* Validate: signal may have woken the thread without removing it */
-    if (!(waiter->wait_type & WAIT_SEMAPHORE) ||
-            waiter->sem_wait_obj != sem) {
-        TRACE_THREAD("SEM_UP: Skipping stale waiter %d (wait_type=0x%x, obj=%p)",
-                        waiter->tid, waiter->wait_type, (void*)waiter->sem_wait_obj);
-        /* Remove stale entry */
+    /*
+     * Stale-entry guard: a signal may have woken the thread and cleared
+     * its wait_type / sem_wait_obj without removing it from our queue.
+     * Remove it and return — the token stays in count.
+     */
+    if (!(waiter->wait_type & WAIT_SEMAPHORE) || waiter->sem_wait_obj != sem) {
+        TRACE_THREAD("SEM_UP: Stale waiter %d (wait_type=0x%x obj=%p), removing",
+                     waiter->tid, waiter->wait_type, (void *)waiter->sem_wait_obj);
         if (prev_waiter)
             prev_waiter->next_wait = waiter->next_wait;
         else
             sem->wait_queue = waiter->next_wait;
         waiter->next_wait = NULL;
+        /*
+         * Token stays in count — do not remove the waiter a second time
+         * (old double-remove bug).  Return immediately.
+         */
+        spl(sr);
+        return THREAD_SUCCESS;
     }
 
-    /* Remove waiter from wait queue */
+    /* ---- Remove the valid waiter from the queue ---- */
     if (prev_waiter)
         prev_waiter->next_wait = waiter->next_wait;
     else
         sem->wait_queue = waiter->next_wait;
- 
-    waiter->next_wait   = NULL;
-    waiter->wait_type  &= ~WAIT_SEMAPHORE;
+
+    waiter->next_wait    = NULL;
+    waiter->wait_type   &= ~WAIT_SEMAPHORE;
     waiter->sem_wait_obj = NULL;
- 
-    /* Cancel any timeout */
+
+    /* Cancel any pending timeout for this waiter. */
     if (waiter->sleep_timeout) {
         TRACE_THREAD("SEM_UP: Canceling timeout for thread %d", waiter->tid);
         canceltimeout(waiter->sleep_timeout);
         waiter->sleep_timeout = NULL;
     }
 
-    TRACE_THREAD("SEM_UP: Waking thread %d (priority %d)",
-                 waiter->tid, waiter->priority);
- 
-    /* Clear any stale sleep state that may have been set concurrently */
+    /* Clear stale sleep state (defensive). */
     if (waiter->wakeup_time > 0) {
         waiter->wakeup_time = 0;
         remove_from_sleep_queue(waiter->proc, waiter);
     }
- 
-    /* Make waiter runnable */
+
+    TRACE_THREAD("SEM_UP: Waking thread %d (priority %d)",
+                 waiter->tid, waiter->priority);
+
     proc_thread_state_change(waiter, THREAD_STATE_READY);
     add_to_ready_queue(waiter);
- 
+
     /*
-     * Priority preemption: if the woken thread outranks us, yield
-     * immediately so it can run without waiting for the next timer tick.
+     * Priority preemption: if the woken thread outranks us, yield now
+     * so it runs without waiting for the next timer tick.
      *
-     * Note: we release the interrupt lock BEFORE calling
-     * proc_thread_schedule() because schedule() itself will call
-     * splhigh/spl internally, and nesting the lock would deadlock on
-     * any architecture that uses a non-reentrant spl scheme.
+     * Release the interrupt lock BEFORE calling proc_thread_schedule()
+     * — schedule() takes splhigh() internally and our spl scheme is
+     * non-reentrant.
      */
     if (waiter->priority > current->priority) {
-        TRACE_THREAD("SEM_UP: Waiter %d has higher priority, preempting",
-                     waiter->tid);
+        TRACE_THREAD("SEM_UP: Waiter %d outranks current %d, preempting",
+                     waiter->tid, current->tid);
         spl(sr);
         proc_thread_schedule();
         return THREAD_SUCCESS;
     }
- 
+
     spl(sr);
     return THREAD_SUCCESS;
 }

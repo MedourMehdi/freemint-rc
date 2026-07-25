@@ -216,9 +216,12 @@ int proc_thread_condvar_wait(struct condvar *cond, struct mutex *mutex) {
         return unlock_result;
     }
     TRACE_THREAD("CONDVAR WAIT: Thread %d released mutex %p and is now blocked on condvar=%p", t->tid, mutex, cond);
+
     // Block until signaled
+    TRACE_THREAD_VERBOSE("CONDVAR WAIT: Thread %d: Calling proc_thread_schedule()");
     proc_thread_schedule();
-    
+    TRACE_THREAD_VERBOSE("CONDVAR WAIT: Thread %d returned from proc_thread_schedule()", t->tid);
+
     // When we wake up, reacquire the mutex
     int lock_result = thread_mutex_lock(mutex);
     TRACE_THREAD("CONDVAR WAIT: Thread %d reacquired mutex %p after waiting on condvar=%pn result=%d", t->tid, mutex, cond, lock_result);
@@ -409,7 +412,9 @@ int proc_thread_condvar_timedwait(struct condvar *cond, struct mutex *mutex, lon
     }
     
     // Block until signaled or timeout
+    TRACE_THREAD_VERBOSE("CONDVAR TIMEDWAIT: Calling proc_thread_schedule()");
     proc_thread_schedule();
+    TRACE_THREAD_VERBOSE("CONDVAR TIMEDWAIT: Back from proc_thread_schedule()");
     
     // Cancel timeout if it exists
     sr = splhigh();

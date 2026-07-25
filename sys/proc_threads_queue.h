@@ -40,6 +40,10 @@ int is_in_signal_wait_queue(struct proc *p, struct thread *t);
 int is_in_sleep_queue(struct proc *p, struct thread *t);
 #endif
 
+#if THREAD_DEBUG_LEVEL >= THREAD_DEBUG_NORMAL
+void dump_ready_queue_threads(struct proc *p, const char *label);
+#endif
+
 /* Wait queue optimization */
 struct thread *find_highest_priority_thread_in_queue(struct thread *queue, struct thread **prev_highest);
 
