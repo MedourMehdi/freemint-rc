@@ -24,6 +24,16 @@
 #include "magic/magic.i"
 #include "mint/asmdefs.h"
 
+/* FPE_* constants for assembly use — must match signal.h */
+#define ASM_FPE_INTDIV  0x0801
+#define ASM_FPE_INTOVF  0x0802
+#define ASM_FPE_FLTDIV  0x0803
+#define ASM_FPE_FLTOVF  0x0804
+#define ASM_FPE_FLTUND  0x0805
+#define ASM_FPE_FLTRES  0x0806
+#define ASM_FPE_FLTINV  0x0807
+#define ASM_FPE_FLTSUB  0x0808
+
 //
 // interrupt wrapping routines; these should just save registers and call
 // the appropriate C handlers, unless speed is a major problem
@@ -1019,11 +1029,15 @@ SYM(new_divzero):
 #ifdef M68000
 	move.w	#0x14,SYM(sig_exc)
 #endif
-#ifdef __mcoldfire__
 	move.l	a0,-(sp)
+	move.l	SYM(curproc),a0
+	move.w	#ASM_FPE_INTDIV,P_EXCFPECODE(a0)
+	move.l	(sp)+,a0
+#ifdef __mcoldfire__
+	// move.l	a0,-(sp)
 	lea	SYM(sig_routine),a0
 	move.l	#SYM(sigfpe),(a0)
-	move.l	(sp)+,a0
+	// move.l	(sp)+,a0
 #else
 	move.l	#SYM(sigfpe),SYM(sig_routine)
 #endif
@@ -1059,11 +1073,15 @@ SYM(new_chk):
 #ifdef M68000
 	move.w	#0x18,SYM(sig_exc)
 #endif
-#ifdef __mcoldfire__
 	move.l	a0,-(sp)
+	move.l	SYM(curproc),a0
+	move.w	#ASM_FPE_FLTSUB,P_EXCFPECODE(a0)
+	move.l	(sp)+,a0
+#ifdef __mcoldfire__
+	// move.l	a0,-(sp)
 	lea	SYM(sig_routine),a0
 	move.l	#SYM(sigfpe),(a0)
-	move.l	(sp)+,a0
+	// move.l	(sp)+,a0
 #else
 	move.l	#SYM(sigfpe),SYM(sig_routine)
 #endif
@@ -1079,11 +1097,15 @@ SYM(new_trapv):
 #ifdef M68000
 	move.w	#0x1c,SYM(sig_exc)
 #endif
-#ifdef __mcoldfire__
 	move.l	a0,-(sp)
+	move.l	SYM(curproc),a0
+	move.w	#ASM_FPE_INTOVF,P_EXCFPECODE(a0)
+	move.l	(sp)+,a0
+#ifdef __mcoldfire__
+	// move.l	a0,-(sp)
 	lea	SYM(sig_routine),a0
 	move.l	#SYM(sigfpe),(a0)
-	move.l	(sp)+,a0
+	// move.l	(sp)+,a0
 #else
 	move.l	#SYM(sigfpe),SYM(sig_routine)
 #endif
@@ -1139,11 +1161,15 @@ SYM(old_fpcp_6):
 	dc.l	0
 SYM(new_fpcp):
 // don't set sig_exc - only needed for 68000 vectors
-#ifdef __mcoldfire__
 	move.l	a0,-(sp)
+	move.l	SYM(curproc),a0
+	move.w	#0,P_EXCFPECODE(a0)		// 0 = "decode from FPSR in sigfpe()"
+	move.l	(sp)+,a0
+#ifdef __mcoldfire__
+	// move.l	a0,-(sp)
 	lea	SYM(sig_routine),a0
 	move.l	#SYM(sigfpe),(a0)
-	move.l	(sp)+,a0
+	// move.l	(sp)+,a0
 #else
 	move.l	#SYM(sigfpe),SYM(sig_routine)
 #endif

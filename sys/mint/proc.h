@@ -440,7 +440,7 @@ struct proc
 	ulong	exception_addr;		/* access address from stack	*/
 	ushort	exception_mmusr;	/* result from ptest insn	*/
 	ushort	exception_access;	/* cause of the bus error (read, write, read/write) */
-
+	ushort	exception_fpe_code;	/* FPE_* sub-code, set by trap handler before sigfpe() runs */
 
 	ulong	stack_magic;		/* to detect stack overflows	*/
 	char	stack[STKSIZE+4];	/* stack for system calls	*/

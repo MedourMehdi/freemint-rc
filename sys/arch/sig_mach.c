@@ -69,7 +69,7 @@ sendsig(ushort sig)
 	CONTEXT *call, contexts[2];
 	int is_siginfo;
 	siginfo_t *siginfo_ptr = NULL;
-	struct sigqueue_entry *entry = NULL;
+	// struct sigqueue_entry *entry = NULL;
 	void *stack_base_for_validation;
 	size_t stack_size_for_validation;
 
@@ -234,7 +234,8 @@ sendsig(ushort sig)
 	if (is_siginfo) {
 		unsigned short sr;
 		siginfo_t temp_info;
-		
+		struct sigqueue_entry *entry, *prev = NULL;
+
 		TRACE_THREAD("sendsig: SA_SIGINFO handler for sig %d", sig);
 		
 		/* Check if this signal is queued with siginfo data */
@@ -244,8 +245,18 @@ sendsig(ushort sig)
 				/* Found queued signal - use its siginfo */
 				TRACE_THREAD("sendsig: found queued signal with value %d", entry->info.si_value.sival_int);
 				temp_info = entry->info;
+				/* dequeue: this entry has now been delivered */
+				if (prev)
+					prev->next = entry->next;
+				else
+					curproc->sigqueue_head = entry->next;
+				if (curproc->sigqueue_tail == entry)
+					curproc->sigqueue_tail = prev;
+				curproc->sigqueue_count--;
+				kfree(entry);				
 				break;
 			}
+			prev = entry;
 		}
 		
 		/* If no queued entry found, create basic siginfo */
@@ -678,6 +689,8 @@ sigpriv(void)
 void
 sigfpe(void)
 {
+	ushort code = curproc->exception_fpe_code;
+
 	assert(curproc->stack_magic == STACK_MAGIC);
 	
 	DEBUG(("signal SIGFPE raised [syscall_pc 0x%lx, exception_pc 0x%lx]",
@@ -697,9 +710,32 @@ sigfpe(void)
 			 */
 			ctxt->fstate.bytes[ctxt->fstate.bytes[1]] |= 1 << 3;
 		}
+
+		/* code == 0 means new_fpcp fired: decode the real sub-type
+		 * from the accrued-exception byte (FPSR bits 7:0), priority
+		 * order matches Motorola's recommended precedence. */
+		if (code == 0)
+		{
+			unsigned long fpsr = ctxt->fctrl[1];
+			unsigned char aexc = fpsr & 0xff;
+
+			     if (aexc & 0x80) code = FPE_FLTINV;	/* IOP  */
+			else if (aexc & 0x40) code = FPE_FLTOVF;	/* OVFL */
+			else if (aexc & 0x20) code = FPE_FLTUND;	/* UNFL */
+			else if (aexc & 0x10) code = FPE_FLTDIV;	/* DZ   */
+			else if (aexc & 0x08) code = FPE_FLTRES;	/* INEX */
+			else code = FPE_FLTINV;	/* fallback: shouldn't happen */
+		}
 	}
-	
-	raise(SIGFPE);
+	else if (code == 0)
+	{
+		/* no FPU and code wasn't set by divzero/chk/trapv -- shouldn't
+		 * happen, but don't leave si_code as garbage */
+		code = FPE_FLTINV;
+	}
+
+	// raise(SIGFPE);
+	post_sig_info(curproc, SIGFPE, code, NULL);
 }
 
 void

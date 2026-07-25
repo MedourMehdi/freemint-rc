@@ -82,6 +82,7 @@ magics [] =
 	{ "P_EXCTBL",		offsetof(struct proc, exception_tbl)		},
 	{ "P_EXCMMUSR",		offsetof(struct proc, exception_mmusr)		},
 	{ "P_EXCACCESS",	offsetof(struct proc, exception_access)		},
+	{ "P_EXCFPECODE",	offsetof(struct proc, exception_fpe_code)	},
 	{ "P_SIGMASK",		offsetof(struct proc, p_sigmask)		},
 	{ "P_SIGPENDING",	offsetof(struct proc, sigpending)		},
 	{ "P_INDOS",		offsetof(struct proc, in_dos)			},

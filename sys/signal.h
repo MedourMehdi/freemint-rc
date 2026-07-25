@@ -16,5 +16,5 @@ void		check_sigs	(void);
 void	_cdecl	raise		(ushort sig);
 void		handle_sig	(ushort sig);
 void	_cdecl	stop		(ushort sig);
-
+void        post_sig_info   (PROC *p, int sig, int code, void *addr);
 # endif /* _signal_h */

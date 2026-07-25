@@ -29,6 +29,7 @@
 # include "proc_help.h"
 # include "util.h"
 
+# include "kmemory.h"
 # include "proc_threads_debug.h"
 
 /* send_sig: Send signal SIG to process P. If PRIV is non-zero then
@@ -670,4 +671,61 @@ stop (ushort sig)
 
 	/* and discard any signals that would cause us to stop again */
 	get_curproc()->sigpending &= ~STOPSIGS;
+}
+
+/*
+ * post_sig_info: like post_sig(), but attaches a real siginfo_t
+ * (si_code, etc.) instead of defaulting to SI_USER. Used by hardware
+ * exception handlers (sigfpe, and future sigbus/sigsegv extended info)
+ * that know a specific fault sub-code.
+ */
+void
+post_sig_info(PROC *p, int sig, int code, void *addr)
+{
+	struct sigqueue_entry *entry;
+	unsigned short sr;
+	siginfo_t info;
+
+	if (!p || sig < 1 || sig >= NSIG)
+		return;
+
+	if (p->sigqueue_count >= SIGQUEUE_MAX) {
+		TRACE_THREAD("post_sig_info: queue full, falling back to post_sig()");
+		post_sig(p, sig);
+		return;
+	}
+
+	memset(&info, 0, sizeof(info));
+	info.si_signo = sig;
+	info.si_code = code;
+	info.si_addr = addr;
+	info.si_pid = 0;
+	info.si_uid = 0;
+
+	entry = kmalloc(sizeof(*entry));
+	if (!entry) {
+		TRACE_THREAD("post_sig_info: out of memory, falling back to post_sig()");
+		post_sig(p, sig);
+		return;
+	}
+
+	memcpy(&entry->info, &info, sizeof(siginfo_t));
+	entry->queued = 1;
+	entry->next = NULL;
+
+	sr = splhigh();
+	if (p->sigqueue_tail)
+		p->sigqueue_tail->next = entry;
+	else
+		p->sigqueue_head = entry;
+	p->sigqueue_tail = entry;
+	p->sigqueue_count++;
+	spl(sr);
+
+	if (p->p_sigacts && p->p_sigacts->thread_signals && p->current_thread && p->current_thread->tid > 0)
+		proc_thread_signal_aware_raise(p, sig);
+	else
+		post_sig(p, sig);
+
+	check_sigs();
 }

@@ -683,6 +683,12 @@ sleep(int _que, long cond)
 		TRACE_THREAD("SLEEPPROC: save_context THREAD ID %d, process ID %d, waitcond %ld, new process id %d", curproc->current_thread->tid, curproc->pid, curproc->wait_cond, p->pid);
 		_ctx = &(curproc->current_thread->ctxt[SYSCALL]);
 	} else {
+		if(curproc->current_thread 
+			&& curproc->current_thread->tid == 0
+		) 
+		{
+			TRACE_THREAD("SLEEPPROC: save_context MAIN THREAD ID %d, process ID %d, waitcond %ld, new process id %d", curproc->current_thread->tid, curproc->pid, curproc->wait_cond, p->pid);
+		}
 		_ctx = &(curproc->ctxt[CURRENT]);
 	}
 	
@@ -711,6 +717,12 @@ sleep(int _que, long cond)
 		TRACE_THREAD("SLEEPPROC: change_context THREAD ID %d, process ID %d, waitcond %ld, new process id %d", curproc->current_thread->tid, curproc->pid, curproc->wait_cond, p->pid);
 		_ctx = &(curproc->current_thread->ctxt[SYSCALL]);
 	} else {
+		if(curproc->current_thread 
+			&& curproc->current_thread->tid == 0
+		) 
+		{
+			TRACE_THREAD("SLEEPPROC: change_context MAIN THREAD ID %d, process ID %d, waitcond %ld, new process id %d", curproc->current_thread->tid, curproc->pid, curproc->wait_cond, p->pid);
+		}
 		_ctx = &(curproc->ctxt[CURRENT]);
 	}
 	
